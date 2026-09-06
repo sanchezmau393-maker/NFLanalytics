@@ -3,39 +3,64 @@ import numpy as np
 
 def build_features(schedules):
     df = schedules.copy()
-    played = df.dropna(subset=['home_score', 'away_score']).copy()
     
-    # Vista local
-    home = played[['game_id', 'season', 'week', 'home_team', 'home_score', 'away_score']].copy()
+    # Utilizamos TODOS los juegos (jugados y futuros)
+    home = df[['game_id', 'season', 'week', 'home_team', 'home_score', 'away_score']].copy()
     home.rename(columns={'home_team': 'team', 'home_score': 'pts_scored', 'away_score': 'pts_allowed'}, inplace=True)
     home['is_home'] = 1
     
-    # Vista visitante
-    away = played[['game_id', 'season', 'week', 'away_team', 'away_score', 'home_score']].copy()
+    away = df[['game_id', 'season', 'week', 'away_team', 'away_score', 'home_score']].copy()
     away.rename(columns={'away_team': 'team', 'away_score': 'pts_scored', 'home_score': 'pts_allowed'}, inplace=True)
     away['is_home'] = 0
     
     team_games = pd.concat([home, away]).sort_values(['season', 'week'])
     
-    def roll_stats(g):
+    def apply_rolling(g):
         g = g.sort_values(['season', 'week'])
-        # CAMBIO CLAVE: Usamos rolling(17) para arrastrar el nivel de los últimos 17 juegos (aprox. 1 temporada)
-        g['pts_scored_season'] = g['pts_scored'].shift(1).rolling(17, min_periods=1).mean()
-        g['pts_allowed_season'] = g['pts_allowed'].shift(1).rolling(17, min_periods=1).mean()
         
-        g['pts_scored_l3'] = g['pts_scored'].shift(1).rolling(3, min_periods=1).mean()
-        g['pts_allowed_l3'] = g['pts_allowed'].shift(1).rolling(3, min_periods=1).mean()
+        # Identificar solo los partidos que ya tienen un resultado real
+        played_idx = g['pts_scored'].notna()
+        valid_sc = g.loc[played_idx, 'pts_scored']
+        valid_al = g.loc[played_idx, 'pts_allowed']
         
-        g['pts_scored_l5'] = g['pts_scored'].shift(1).rolling(5, min_periods=1).mean()
-        g['pts_allowed_l5'] = g['pts_allowed'].shift(1).rolling(5, min_periods=1).mean()
+        # Calcular promedios SOLO sobre los partidos jugados para no diluir los datos con NaNs
+        roll_17_sc = valid_sc.rolling(17, min_periods=1).mean()
+        roll_3_sc = valid_sc.rolling(3, min_periods=1).mean()
+        roll_5_sc = valid_sc.rolling(5, min_periods=1).mean()
+        
+        roll_17_al = valid_al.rolling(17, min_periods=1).mean()
+        roll_3_al = valid_al.rolling(3, min_periods=1).mean()
+        roll_5_al = valid_al.rolling(5, min_periods=1).mean()
+        
+        # Asignar los cálculos temporales respetando el índice del dataframe original
+        g['temp_17_sc'] = np.nan; g.loc[played_idx, 'temp_17_sc'] = roll_17_sc
+        g['temp_3_sc'] = np.nan;  g.loc[played_idx, 'temp_3_sc'] = roll_3_sc
+        g['temp_5_sc'] = np.nan;  g.loc[played_idx, 'temp_5_sc'] = roll_5_sc
+        
+        g['temp_17_al'] = np.nan; g.loc[played_idx, 'temp_17_al'] = roll_17_al
+        g['temp_3_al'] = np.nan;  g.loc[played_idx, 'temp_3_al'] = roll_3_al
+        g['temp_5_al'] = np.nan;  g.loc[played_idx, 'temp_5_al'] = roll_5_al
+        
+        # shift(1): Mueve los datos un partido hacia adelante (Evita Data Leakage).
+        # ffill(): Arrastra el último nivel conocido hacia los partidos futuros de 2026.
+        g['pts_scored_season'] = g['temp_17_sc'].shift(1).ffill()
+        g['pts_allowed_season'] = g['temp_17_al'].shift(1).ffill()
+        g['pts_scored_l3'] = g['temp_3_sc'].shift(1).ffill()
+        g['pts_allowed_l3'] = g['temp_3_al'].shift(1).ffill()
+        g['pts_scored_l5'] = g['temp_5_sc'].shift(1).ffill()
+        g['pts_allowed_l5'] = g['temp_5_al'].shift(1).ffill()
+        
+        # Limpiar columnas temporales
+        g = g.drop(columns=[c for c in g.columns if c.startswith('temp_')])
         return g
         
-    # CAMBIO CLAVE: Agrupamos SOLO por 'team' (equipo). Así arrastran el nivel de la temporada pasada a la Semana 1.
-    team_games = team_games.groupby('team', group_keys=False).apply(roll_stats).reset_index(drop=True)
+    team_games = team_games.groupby('team', group_keys=False).apply(apply_rolling).reset_index(drop=True)
     
+    # Actualización del momentum
     team_games['momentum_off'] = team_games['pts_scored_l3'] - team_games['pts_scored_season']
     team_games['momentum_def'] = team_games['pts_allowed_season'] - team_games['pts_allowed_l3']
     
+    # Fillna aplica ahora SOLO para el primer partido histórico de la franquicia en 2015
     team_games.fillna({
         'pts_scored_season': 21.0, 'pts_allowed_season': 21.0,
         'pts_scored_l3': 21.0, 'pts_allowed_l3': 21.0,
@@ -64,3 +89,5 @@ def prepare_matchup_data(schedules, team_games):
     df = df.merge(a_feats, on='game_id', how='left')
     
     return df
+
+
