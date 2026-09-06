@@ -18,10 +18,10 @@ def build_features(schedules):
     team_games = pd.concat([home, away]).sort_values(['season', 'week'])
     
     def roll_stats(g):
-        g = g.sort_values('week')
-        # SHIFT(1) OBLIGATORIO: previene Data Leakage usará solo datos PREVIOS al juego
-        g['pts_scored_season'] = g['pts_scored'].shift(1).expanding().mean()
-        g['pts_allowed_season'] = g['pts_allowed'].shift(1).expanding().mean()
+        g = g.sort_values(['season', 'week'])
+        # CAMBIO CLAVE: Usamos rolling(17) para arrastrar el nivel de los últimos 17 juegos (aprox. 1 temporada)
+        g['pts_scored_season'] = g['pts_scored'].shift(1).rolling(17, min_periods=1).mean()
+        g['pts_allowed_season'] = g['pts_allowed'].shift(1).rolling(17, min_periods=1).mean()
         
         g['pts_scored_l3'] = g['pts_scored'].shift(1).rolling(3, min_periods=1).mean()
         g['pts_allowed_l3'] = g['pts_allowed'].shift(1).rolling(3, min_periods=1).mean()
@@ -30,7 +30,8 @@ def build_features(schedules):
         g['pts_allowed_l5'] = g['pts_allowed'].shift(1).rolling(5, min_periods=1).mean()
         return g
         
-    team_games = team_games.groupby(['season', 'team'], group_keys=False).apply(roll_stats).reset_index(drop=True)
+    # CAMBIO CLAVE: Agrupamos SOLO por 'team' (equipo). Así arrastran el nivel de la temporada pasada a la Semana 1.
+    team_games = team_games.groupby('team', group_keys=False).apply(roll_stats).reset_index(drop=True)
     
     team_games['momentum_off'] = team_games['pts_scored_l3'] - team_games['pts_scored_season']
     team_games['momentum_def'] = team_games['pts_allowed_season'] - team_games['pts_allowed_l3']
