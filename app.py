@@ -58,7 +58,7 @@ recent_years = [int(seasons_in_data[0])]
 if len(seasons_in_data) > 1:
     recent_years.append(int(seasons_in_data[1]))
 
-weekly_data = data_loader.load_weekly_data(recent_years)
+weekly_data = data_loader.get_weekly_stats(recent_years)
 
 # --- BARRA LATERAL ---
 st.sidebar.header("⚙️ Configuración")
