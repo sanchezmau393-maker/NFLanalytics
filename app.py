@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy.stats import norm
+import itertools
+from operator import itemgetter
 import data_loader
 import features
 import model
@@ -16,7 +18,17 @@ if 'selected_game_id' not in st.session_state:
 def select_game(game_id):
     st.session_state.selected_game_id = game_id
 
-# --- FUNCIONES DE MEMORIA (CACHÉ) PARA EVITAR TIEMPOS DE CARGA ---
+def get_ml_odds(american_odds, prob):
+    """Convierte momio americano a decimal o calcula cuota justa si no hay momio de Vegas."""
+    if pd.notna(american_odds) and american_odds != "" and american_odds != 0:
+        try:
+            odds = float(american_odds)
+            if odds > 0: return (odds / 100.0) + 1.0
+            if odds < 0: return (100.0 / abs(odds)) + 1.0
+        except: pass
+    # Fallback: Cuota justa calculada por el modelo si la casa de apuestas aún no abre la línea
+    return max(1.05, 1.0 / prob) if prob > 0 else 1.05
+
 @st.cache_data(show_spinner=False)
 def preparar_datos_y_momentum(schedules):
     t_games = features.build_features(schedules)
@@ -41,7 +53,6 @@ with st.spinner("Cargando momentum y modelos predictivos (solo toma unos segundo
     matchups = preparar_datos_y_momentum(schedules)
     m_home, m_away, feat_cols, std_home, std_away, metrics = entrenar_modelos_ml(matchups)
 
-# Cargar datos de jugadores para lesiones y props (últimas temporadas)
 seasons_in_data = sorted(schedules['season'].dropna().unique(), reverse=True)
 recent_years = [int(seasons_in_data[0])]
 if len(seasons_in_data) > 1:
@@ -56,7 +67,6 @@ selected_season = st.sidebar.selectbox("Temporada:", seasons_in_data, index=0)
 season_data = matchups[matchups['season'] == selected_season]
 weeks_avail = sorted([int(w) for w in season_data['week'].dropna().unique()])
 
-# Detectar semana predeterminada
 unplayed = season_data[season_data['home_score'].isna()]
 default_week = int(unplayed['week'].min()) if not unplayed.empty else (weeks_avail[0] if weeks_avail else 1)
 
@@ -95,7 +105,7 @@ with tabs[0]:
                     select_game(row['game_id'])
                     st.success("¡Partido seleccionado! Pasa a la pestaña '🔮 Predicción'.")
 
-# --- PESTAÑA 2: PREDICCIÓN CON LESIONES AUTOMÁTICAS ---
+# --- PESTAÑA 2: PREDICCIÓN ---
 with tabs[1]:
     if not st.session_state.selected_game_id:
         st.info("👈 Por favor selecciona un partido desde la pestaña '📅 Cartelera'.")
@@ -107,7 +117,6 @@ with tabs[1]:
             g = g.iloc[0]
             st.header(f"Análisis: {g['away_team']} @ {g['home_team']}")
             
-            # Módulo de lesiones por Roster
             st.subheader("🚑 Reporte Automático de Lesiones y Bajas")
             col_inj1, col_inj2 = st.columns(2)
             
@@ -184,28 +193,18 @@ with tabs[1]:
 # --- PESTAÑA 3: EFICIENCIA DE PREDICCIÓN ---
 with tabs[2]:
     st.header(f"🎯 Eficiencia de Predicción - Temporada {selected_season}")
-    st.write("Esta pestaña evalúa automáticamente las predicciones del modelo contra los resultados reales de los partidos que ya concluyeron en la temporada seleccionada.")
     
     played_games = season_data[season_data['home_score'].notna()].copy()
-    
     if played_games.empty:
         st.info(f"Aún no hay resultados finales para evaluar en la temporada {selected_season}.")
     else:
-        # Extraer características y predecir
         X_hist = played_games[feat_cols].fillna(0)
         played_games['pred_home'] = m_home.predict(X_hist)
         played_games['pred_away'] = m_away.predict(X_hist)
-        
-        # Determinar ganadores reales y predichos
         played_games['real_winner'] = np.where(played_games['home_score'] > played_games['away_score'], played_games['home_team'], played_games['away_team'])
         played_games['pred_winner'] = np.where(played_games['pred_home'] > played_games['pred_away'], played_games['home_team'], played_games['away_team'])
-        
-        # Evaluar aciertos
         played_games['is_correct'] = played_games['real_winner'] == played_games['pred_winner']
-        
-        # Excluir empates de la métrica (son muy raros y ensucian la eficacia de ganador)
-        empates_reales = played_games['home_score'] == played_games['away_score']
-        valid_games = played_games[~empates_reales]
+        valid_games = played_games[played_games['home_score'] != played_games['away_score']]
         
         total_valid = len(valid_games)
         correct_preds = valid_games['is_correct'].sum()
@@ -217,26 +216,10 @@ with tabs[2]:
         c3.metric("Eficacia General (%)", f"{acc_percentage:.1f}%")
         
         st.subheader("Evolución de Eficacia por Semana")
-        # Agrupar por semana para el gráfico
         weekly_acc = valid_games.groupby('week')['is_correct'].mean() * 100
-        weekly_acc.name = "% de Acierto"
         st.line_chart(weekly_acc)
-        
-        st.subheader("Desglose de Partidos")
-        display_df = played_games[['week', 'away_team', 'home_team', 'away_score', 'home_score', 'pred_winner', 'is_correct']].copy()
-        display_df.rename(columns={
-            'week': 'Semana',
-            'away_team': 'Visitante',
-            'home_team': 'Local',
-            'away_score': 'Pts Vis',
-            'home_score': 'Pts Loc',
-            'pred_winner': 'Ganador Predicho',
-            'is_correct': '¿Acertó?'
-        }, inplace=True)
-        
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-# --- PESTAÑA 4: PLAYER PROPS FUNCIONAL ---
+# --- PESTAÑA 4: PLAYER PROPS ---
 with tabs[3]:
     st.header("🏃 Player Props (Probabilidades por Jugador)")
     if weekly_data.empty:
@@ -244,10 +227,8 @@ with tabs[3]:
     else:
         teams_avail = sorted(weekly_data['recent_team'].dropna().unique())
         col_p1, col_p2 = st.columns(2)
-        
         selected_team = col_p1.selectbox("Selecciona Equipo:", teams_avail)
         team_players = weekly_data[weekly_data['recent_team'] == selected_team]
-        
         player_names = sorted(team_players['player_display_name'].dropna().unique())
         selected_player = col_p2.selectbox("Selecciona Jugador:", player_names)
         
@@ -257,52 +238,120 @@ with tabs[3]:
             st.markdown(f"### Análisis de {selected_player} ({pos})")
             
             metrics_list = []
-            if pos == 'QB':
-                metrics_list = [('passing_yards', 'Yardas por Pase'), ('attempts', 'Intentos de Pase')]
-            elif pos in ['WR', 'TE']:
-                metrics_list = [('receiving_yards', 'Yardas por Recepción'), ('receptions', 'Recepciones')]
-            elif pos == 'RB':
-                metrics_list = [('rushing_yards', 'Yardas Terrestres'), ('carries', 'Acarreos')]
-            else:
-                metrics_list = [('receiving_yards', 'Yardas Totales'), ('receptions', 'Recepciones')]
+            if pos == 'QB': metrics_list = [('passing_yards', 'Yardas por Pase'), ('attempts', 'Intentos de Pase')]
+            elif pos in ['WR', 'TE']: metrics_list = [('receiving_yards', 'Yardas por Recepción'), ('receptions', 'Recepciones')]
+            elif pos == 'RB': metrics_list = [('rushing_yards', 'Yardas Terrestres'), ('carries', 'Acarreos')]
+            else: metrics_list = [('receiving_yards', 'Yardas Totales'), ('receptions', 'Recepciones')]
 
             probs = [0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20, 0.10]
             labels = ["90% (Muy Seguro)", "80%", "70%", "60%", "50% (Promedio)", "40%", "30%", "20%", "10% (Arriesgado)"]
-            
             df_props = pd.DataFrame({"Probabilidad (OVER)": labels})
             
             for col_stat, stat_name in metrics_list:
                 stat_values = p_data[col_stat].dropna()
                 if len(stat_values) >= 2:
                     mu, sigma = stat_values.mean(), stat_values.std()
-                    if sigma == 0 or np.isnan(sigma): sigma = 0.1
+                    sigma = 0.1 if sigma == 0 or np.isnan(sigma) else sigma
                     lines = [max(0, np.round(norm.ppf(1 - p, loc=mu, scale=sigma), 1)) for p in probs]
                     df_props[f"Línea de {stat_name}"] = lines
                     st.caption(f"**{stat_name}:** Promedio {mu:.1f} | Desviación {sigma:.1f}")
-            
             st.dataframe(df_props, use_container_width=True, hide_index=True)
 
-# --- PESTAÑA 5: COMBINADAS ---
+# --- PESTAÑA 5: COMBINADAS INTELIGENTES ---
 with tabs[4]:
-    st.header("🔗 Calculadora de Parlays")
-    df_preds = tracker.load_predictions()
-    if not df_preds.empty:
-        selections = st.multiselect("Selecciona partidos guardados:", df_preds['game_id'].tolist())
-        if selections:
-            prob_total = 1.0
-            for s in selections:
-                row = df_preds[df_preds['game_id'] == s].iloc[0]
-                max_p = max(row['prob_home'], row['prob_away'])
-                pick_team = row['home_team'] if row['prob_home'] > row['prob_away'] else row['away_team']
-                prob_total *= max_p
-                st.write(f"- **{s}**: Gana {pick_team} ({max_p*100:.1f}%)")
-            
-            st.divider()
-            c1, c2 = st.columns(2)
-            c1.metric("Probabilidad Combinada", f"{prob_total*100:.2f}%")
-            c2.metric("Cuota Implícita (Decimal)", f"{1/prob_total:.2f}" if prob_total > 0 else "N/A")
+    st.header("🔗 Generador Inteligente de Combinadas (Frontera Eficiente)")
+    
+    if week_games.empty:
+        st.info("No hay partidos pendientes para analizar en esta semana.")
     else:
-        st.info("Realiza y guarda predicciones para armar combinadas.")
+        st.write("Selecciona tu nivel de riesgo. El algoritmo calculará todas las combinaciones posibles de la semana actual respetando las reglas de Las Vegas (no ML + Spread del mismo juego) y te ofrecerá aquellas que tienen el mayor beneficio esperado (Expected Value).")
+        
+        c1, c2 = st.columns(2)
+        riesgo = c1.selectbox("Nivel de Riesgo (Prob. de éxito de la combinada):", [
+            "Muy Conservadora (Prob. 25% - 40%)",
+            "Equilibrada (Prob. 10% - 25%)",
+            "Arriesgada (Prob. 3% - 10%)",
+            "Lotería (Prob. < 3%)"
+        ])
+        
+        lista_juegos = ["Ninguno"] + [f"{r['away_team']} @ {r['home_team']}" for _, r in week_games.iterrows()]
+        juego_obligatorio = c2.selectbox("Incluir un partido obligatoriamente:", lista_juegos)
+        
+        if st.button("🚀 Generar Opciones de Combinadas", type="primary"):
+            with st.spinner("Simulando miles de combinaciones..."):
+                all_picks = []
+                # 1. Extraer probabilidades de todos los juegos de la semana
+                for _, row in week_games.iterrows():
+                    match_data = matchups[matchups['game_id'] == row['game_id']].iloc[0]
+                    X_m = match_data[feat_cols].to_frame().T.fillna(0)
+                    p_h = max(0, m_home.predict(X_m)[0])
+                    p_a = max(0, m_away.predict(X_m)[0])
+                    
+                    res = monte_carlo.run_simulation(p_h, p_a, std_home, std_away, n_sims=2000)
+                    
+                    ou_line = float(row['total_line']) if pd.notna(row['total_line']) else 45.5
+                    spread_line = float(row['spread_line']) if pd.notna(row['spread_line']) else 0.0
+                    
+                    p_over = np.mean(res['total'] > ou_line)
+                    p_under = np.mean(res['total'] < ou_line)
+                    p_cov_h = np.mean(res['diff'] > spread_line)
+                    p_cov_a = np.mean(res['diff'] < spread_line)
+                    
+                    gid = row['game_id']
+                    m_str = f"{row['away_team']} @ {row['home_team']}"
+                    
+                    all_picks.append({'id': f"{gid}_ML_H", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['home_team']}", 'prob': res['prob_home'], 'odds': get_ml_odds(row.get('home_moneyline'), res['prob_home'])})
+                    all_picks.append({'id': f"{gid}_ML_A", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['away_team']}", 'prob': res['prob_away'], 'odds': get_ml_odds(row.get('away_moneyline'), res['prob_away'])})
+                    all_picks.append({'id': f"{gid}_SP_H", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['home_team']} cubre Spread ({spread_line})", 'prob': p_cov_h, 'odds': 1.91})
+                    all_picks.append({'id': f"{gid}_SP_A", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['away_team']} cubre Spread ({-spread_line})", 'prob': p_cov_a, 'odds': 1.91})
+                    all_picks.append({'id': f"{gid}_OU_O", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"OVER {ou_line}", 'prob': p_over, 'odds': 1.91})
+                    all_picks.append({'id': f"{gid}_OU_U", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"UNDER {ou_line}", 'prob': p_under, 'odds': 1.91})
+                
+                valid_parlays = []
+                # 2. Generar combinaciones de 2 y 3 selecciones
+                for k in [2, 3]:
+                    for combo in itertools.combinations(all_picks, k):
+                        if juego_obligatorio != "Ninguno" and juego_obligatorio not in [p['match'] for p in combo]:
+                            continue
+                            
+                        # Validación de Reglas: Máximo 1 ML/Spread por juego (Evitar conflicto) y máximo 1 O/U por juego
+                        is_valid = True
+                        g_types = {}
+                        for p in combo:
+                            if p['game'] not in g_types: g_types[p['game']] = []
+                            g_types[p['game']].append(p['type'])
+                            
+                        for g_id, t_list in g_types.items():
+                            if 'ML' in t_list and 'Spread' in t_list: is_valid = False; break
+                            if t_list.count('ML') > 1 or t_list.count('Spread') > 1 or t_list.count('OU') > 1: is_valid = False; break
+                            
+                        if not is_valid: continue
+                        
+                        c_prob = np.prod([p['prob'] for p in combo])
+                        c_odds = np.prod([p['odds'] for p in combo])
+                        c_ev = (c_prob * c_odds) - 1 # Expected Value
+                        
+                        # Filtro de Riesgo
+                        if "Conservadora" in riesgo and not (0.25 <= c_prob <= 0.40): continue
+                        if "Equilibrada" in riesgo and not (0.10 <= c_prob < 0.25): continue
+                        if "Arriesgada" in riesgo and not (0.03 <= c_prob < 0.10): continue
+                        if "Lotería" in riesgo and c_prob >= 0.03: continue
+                        
+                        valid_parlays.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'ev': c_ev})
+
+                if not valid_parlays:
+                    st.warning("No se encontraron combinadas que cumplan estrictamente con ese nivel de riesgo y reglas. Intenta cambiar el riesgo.")
+                else:
+                    # Ordenar por el mejor Expected Value (El mejor beneficio en relación a su riesgo)
+                    valid_parlays.sort(key=itemgetter('ev'), reverse=True)
+                    top_parlays = valid_parlays[:8]
+                    
+                    st.success(f"Se generaron las mejores {len(top_parlays)} opciones optimizadas:")
+                    for i, parl in enumerate(top_parlays):
+                        with st.expander(f"⭐ Opción {i+1} | Probabilidad: {parl['prob']*100:.1f}% | Pago: x{parl['odds']:.2f}"):
+                            for leg in parl['combo']:
+                                st.markdown(f"- **{leg['match']}**: {leg['desc']} *(Cuota: {leg['odds']:.2f})*")
+                            st.caption(f"Beneficio Esperado (EV): {parl['ev']:.3f} (Mientras mayor sea el número, mejor valor tiene contra la casa de apuestas).")
 
 # --- PESTAÑA 6: REGISTRO HISTÓRICO ---
 with tabs[5]:
