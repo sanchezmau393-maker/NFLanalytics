@@ -21,7 +21,7 @@ st.markdown("Análisis avanzado, predicción objetiva de bajas y Player Props me
 
 # --- 1. CARGA DE DATOS ---
 with st.spinner("Descargando calendarios e históricos de la NFL..."):
-    schedules = data_loader.load_historical_schedules(2015, 2025)
+    schedules = data_loader.load_historical_schedules(2015, 2026)
     if schedules.empty:
         st.error("Error al obtener los calendarios. Por favor recarga la página.")
         st.stop()
@@ -55,11 +55,12 @@ selected_week = st.sidebar.selectbox("Semana:", weeks_avail, index=weeks_avail.i
 
 tabs = st.tabs([
     "📅 Cartelera", 
-    "🔮 Predicción de Partido", 
+    "🔮 Predicción", 
+    "🎯 Eficiencia",
     "🏃 Player Props",
-    "🔗 Combinadas (Parlays)",
-    "📊 Registro de Predicciones", 
-    "📈 Info del Modelo"
+    "🔗 Combinadas",
+    "📊 Registro", 
+    "📈 Info Modelo"
 ])
 
 week_games = season_data[season_data['week'] == selected_week]
@@ -83,7 +84,7 @@ with tabs[0]:
                 
                 if st.button(f"Analizar {row['away_team']} vs {row['home_team']}", key=f"btn_{row['game_id']}", use_container_width=True):
                     select_game(row['game_id'])
-                    st.success("¡Partido seleccionado! Pasa a la pestaña '🔮 Predicción de Partido'.")
+                    st.success("¡Partido seleccionado! Pasa a la pestaña '🔮 Predicción'.")
 
 # --- PESTAÑA 2: PREDICCIÓN CON LESIONES AUTOMÁTICAS ---
 with tabs[1]:
@@ -109,7 +110,6 @@ with tabs[1]:
             with col_inj2:
                 bajas_away = st.multiselect(f"Bajas en {g['away_team']}:", roster_away)
                 
-            # Cálculo automático de penalización por posición
             penal_home = 0.0
             for player in bajas_home:
                 pos = weekly_data[weekly_data['player_display_name'] == player]['position'].iloc[0] if not weekly_data.empty else 'DEF'
@@ -127,12 +127,10 @@ with tabs[1]:
             if penal_home > 0 or penal_away > 0:
                 st.warning(f"Descuento automático por bajas: -{penal_home:.1f} pts a {g['home_team']} | -{penal_away:.1f} pts a {g['away_team']}")
 
-            # Ajuste manual extra opcional
             col_m1, col_m2 = st.columns(2)
             adj_manual_h = col_m1.number_input(f"Ajuste manual extra {g['home_team']} (Pts):", value=0.0, step=0.5)
             adj_manual_a = col_m2.number_input(f"Ajuste manual extra {g['away_team']} (Pts):", value=0.0, step=0.5)
 
-            # Predicción base + ajustes
             X_match = g[feat_cols].to_frame().T.fillna(0)
             pred_h_base = max(0, m_home.predict(X_match)[0])
             pred_a_base = max(0, m_away.predict(X_match)[0])
@@ -174,8 +172,63 @@ with tabs[1]:
                 )
                 st.success("✅ Predicción registrada en el historial.")
 
-# --- PESTAÑA 3: PLAYER PROPS FUNCIONAL ---
+# --- PESTAÑA 3: EFICIENCIA DE PREDICCIÓN ---
 with tabs[2]:
+    st.header(f"🎯 Eficiencia de Predicción - Temporada {selected_season}")
+    st.write("Esta pestaña evalúa automáticamente las predicciones del modelo contra los resultados reales de los partidos que ya concluyeron en la temporada seleccionada.")
+    
+    played_games = season_data[season_data['home_score'].notna()].copy()
+    
+    if played_games.empty:
+        st.info(f"Aún no hay resultados finales para evaluar en la temporada {selected_season}.")
+    else:
+        # Extraer características y predecir
+        X_hist = played_games[feat_cols].fillna(0)
+        played_games['pred_home'] = m_home.predict(X_hist)
+        played_games['pred_away'] = m_away.predict(X_hist)
+        
+        # Determinar ganadores reales y predichos
+        played_games['real_winner'] = np.where(played_games['home_score'] > played_games['away_score'], played_games['home_team'], played_games['away_team'])
+        played_games['pred_winner'] = np.where(played_games['pred_home'] > played_games['pred_away'], played_games['home_team'], played_games['away_team'])
+        
+        # Evaluar aciertos
+        played_games['is_correct'] = played_games['real_winner'] == played_games['pred_winner']
+        
+        # Excluir empates de la métrica (son muy raros y ensucian la eficacia de ganador)
+        empates_reales = played_games['home_score'] == played_games['away_score']
+        valid_games = played_games[~empates_reales]
+        
+        total_valid = len(valid_games)
+        correct_preds = valid_games['is_correct'].sum()
+        acc_percentage = (correct_preds / total_valid * 100) if total_valid > 0 else 0
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Partidos Evaluados", total_valid)
+        c2.metric("Predicciones Acertadas", correct_preds)
+        c3.metric("Eficacia General (%)", f"{acc_percentage:.1f}%")
+        
+        st.subheader("Evolución de Eficacia por Semana")
+        # Agrupar por semana para el gráfico
+        weekly_acc = valid_games.groupby('week')['is_correct'].mean() * 100
+        weekly_acc.name = "% de Acierto"
+        st.line_chart(weekly_acc)
+        
+        st.subheader("Desglose de Partidos")
+        display_df = played_games[['week', 'away_team', 'home_team', 'away_score', 'home_score', 'pred_winner', 'is_correct']].copy()
+        display_df.rename(columns={
+            'week': 'Semana',
+            'away_team': 'Visitante',
+            'home_team': 'Local',
+            'away_score': 'Pts Vis',
+            'home_score': 'Pts Loc',
+            'pred_winner': 'Ganador Predicho',
+            'is_correct': '¿Acertó?'
+        }, inplace=True)
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+# --- PESTAÑA 4: PLAYER PROPS FUNCIONAL ---
+with tabs[3]:
     st.header("🏃 Player Props (Probabilidades por Jugador)")
     if weekly_data.empty:
         st.warning("No hay datos de jugadores disponibles actualmente.")
@@ -220,8 +273,8 @@ with tabs[2]:
             
             st.dataframe(df_props, use_container_width=True, hide_index=True)
 
-# --- PESTAÑA 4: COMBINADAS ---
-with tabs[3]:
+# --- PESTAÑA 5: COMBINADAS ---
+with tabs[4]:
     st.header("🔗 Calculadora de Parlays")
     df_preds = tracker.load_predictions()
     if not df_preds.empty:
@@ -242,8 +295,8 @@ with tabs[3]:
     else:
         st.info("Realiza y guarda predicciones para armar combinadas.")
 
-# --- PESTAÑA 5: REGISTRO HISTÓRICO ---
-with tabs[4]:
+# --- PESTAÑA 6: REGISTRO HISTÓRICO ---
+with tabs[5]:
     st.header("📊 Registro Histórico")
     df_preds = tracker.load_predictions()
     if df_preds.empty:
@@ -251,8 +304,8 @@ with tabs[4]:
     else:
         st.dataframe(df_preds, use_container_width=True)
 
-# --- PESTAÑA 6: INFO DEL MODELO ---
-with tabs[5]:
+# --- PESTAÑA 7: INFO DEL MODELO ---
+with tabs[6]:
     st.header("📈 Desempeño del Modelo")
     c1, c2 = st.columns(2)
     c1.metric("MAE Local (Error promedio)", f"{metrics['mae_home']:.2f} pts")
