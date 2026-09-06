@@ -9,14 +9,14 @@ def load_historical_schedules(start_year=2015, end_year=2025):
         df = nfl.import_schedules(years)
         return df
     except Exception as e:
-        st.error(f"Error crítico cargando historial de partidos: {e}")
+        st.error(f"Error cargando historial de partidos: {e}")
         return pd.DataFrame()
 
 @st.cache_data(show_spinner=False)
-def load_weekly_data(year):
+def load_weekly_data(years_list):
     try:
-        df = nfl.import_weekly_data([year])
+        df = nfl.import_weekly_data(years_list)
         return df
     except Exception as e:
-        st.warning(f"No se pudieron cargar datos semanales para {year}: {e}")
+        st.warning(f"No se pudieron cargar datos de jugadores: {e}")
         return pd.DataFrame()
