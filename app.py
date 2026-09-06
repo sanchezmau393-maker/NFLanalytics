@@ -28,8 +28,9 @@ def get_ml_odds(american_odds, prob):
         except: pass
     return max(1.05, 1.0 / prob) if prob > 0 else 1.05
 
-@st.cache_data(show_spinner=False)
-def preparar_datos_y_momentum(schedules):
+# Se renombró la función a get_matchups_and_features y se agregó TTL para forzar la limpieza de caché
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_matchups_and_features(schedules):
     t_games = features.build_features(schedules)
     matchups = features.prepare_matchup_data(schedules, t_games)
     return matchups, t_games
@@ -49,18 +50,20 @@ with st.spinner("Descargando calendarios e históricos de la NFL..."):
         st.stop()
 
 # --- 2. INGENIERÍA DE CARACTERÍSTICAS Y ENTRENAMIENTO ---
-with st.spinner("Cargando momentum y modelos predictivos (solo toma unos segundos la primera vez)..."):
-    matchups, team_games = preparar_datos_y_momentum(schedules)
+with st.spinner("Cargando momentum y modelos predictivos..."):
+    matchups, team_games = get_matchups_and_features(schedules)
     m_home, m_away, feat_cols, std_home, std_away, metrics = entrenar_modelos_ml(matchups)
 
 seasons_in_data = sorted(schedules['season'].dropna().unique(), reverse=True)
 curr_year = int(seasons_in_data[0])
-
-# Solicitamos los últimos 4 años (ej. 2026, 2025, 2024, 2023)
-# Esto asegura un historial robusto para que el Machine Learning no descarte jugadores
 target_years = [curr_year, curr_year - 1, curr_year - 2, curr_year - 3]
 
-weekly_data = data_loader.load_all_player_stats(target_years)
+# Carga de historial de jugadores (Asegúrate de que tu data_loader.py tenga esta función actualizada del paso anterior)
+try:
+    weekly_data = data_loader.load_all_player_stats(target_years)
+except AttributeError:
+    # Fallback temporal si la función no se renombró correctamente en data_loader
+    weekly_data = data_loader.load_weekly_data(target_years)
 
 # --- BARRA LATERAL ---
 st.sidebar.header("⚙️ Configuración")
@@ -165,17 +168,15 @@ with tabs[1]:
             
             auto_ou = float(g['total_line']) if pd.notna(g['total_line']) else 45.5
             
-            # CONVERSIÓN DE SPREAD AL ESTÁNDAR LAS VEGAS (Favorito = Negativo)
             raw_sp = float(g['spread_line']) if pd.notna(g['spread_line']) else 0.0
             h_ml = float(g.get('home_moneyline', 0)) if pd.notna(g.get('home_moneyline')) else 0
             a_ml = float(g.get('away_moneyline', 0)) if pd.notna(g.get('away_moneyline')) else 0
             
             if h_ml < 0 and a_ml > 0:
-                auto_spread = -abs(raw_sp) # Local favorito
+                auto_spread = -abs(raw_sp)
             elif a_ml < 0 and h_ml > 0:
-                auto_spread = abs(raw_sp)  # Local underdog
+                auto_spread = abs(raw_sp) 
             else:
-                # Fallback estándar si no hay MoneyLine
                 auto_spread = -raw_sp if raw_sp != 0 else 0.0
             
             ou_line = col_L1.number_input("Línea Over/Under:", value=auto_ou)
@@ -194,7 +195,6 @@ with tabs[1]:
                 
                 prob_over = np.mean(res['total'] > ou_line)
                 prob_under = np.mean(res['total'] < ou_line)
-                # Corrección matemática para Spread estándar Las Vegas (-spread_line compensa el signo)
                 prob_cover = np.mean(res['diff'] > -spread_line)
                 
                 st.markdown(f"**Over {ou_line}:** {prob_over*100:.1f}% | **Under {ou_line}:** {prob_under*100:.1f}%")
@@ -251,7 +251,6 @@ with tabs[3]:
         col_p1, col_p2 = st.columns(2)
         selected_team = col_p1.selectbox("Selecciona Equipo:", [t_away, t_home])
         
-        # Identificar al rival y su fuerza defensiva actual
         if selected_team == t_home:
             opp_team = t_away
             curr_opp_def_season = g_prop.get('away_pts_allowed_season', 21.0)
@@ -261,7 +260,6 @@ with tabs[3]:
             curr_opp_def_season = g_prop.get('home_pts_allowed_season', 21.0)
             curr_opp_def_l3 = g_prop.get('home_pts_allowed_l3', 21.0)
         
-        # Filtrar solo jugadores con al menos 3 partidos jugados
         team_players = weekly_data[weekly_data['recent_team'] == selected_team]
         valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
         
@@ -286,6 +284,15 @@ with tabs[3]:
             labels = ["90% (Muy Seguro)", "80%", "70%", "60%", "50% (Promedio)", "40%", "30%", "20%", "10% (Arriesgado)"]
             df_props = pd.DataFrame({"Probabilidad (OVER)": labels})
             
+            # SOLUCIÓN AL KEYERROR: Extraer defensa del rival desde 'matchups' directamente (100% seguro)
+            opp_h = matchups[['season', 'week', 'home_team', 'home_pts_allowed_season', 'home_pts_allowed_l3']].copy()
+            opp_h.columns = ['season', 'week', 'opponent_team', 'opp_def_season', 'opp_def_l3']
+            
+            opp_a = matchups[['season', 'week', 'away_team', 'away_pts_allowed_season', 'away_pts_allowed_l3']].copy()
+            opp_a.columns = ['season', 'week', 'opponent_team', 'opp_def_season', 'opp_def_l3']
+            
+            opp_def = pd.concat([opp_h, opp_a]).drop_duplicates(subset=['season', 'week', 'opponent_team'])
+
             for col_stat, stat_name in metrics_list:
                 df_stat = p_data.copy().sort_values(['season', 'week'])
                 df_stat['stat'] = df_stat[col_stat]
@@ -298,10 +305,7 @@ with tabs[3]:
                 df_stat['roll_3'] = df_stat['stat'].shift(1).rolling(3, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
                 df_stat['roll_season'] = df_stat['stat'].shift(1).rolling(17, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
                 
-                opp_def = team_games[['season', 'week', 'team', 'pts_allowed_season', 'pts_allowed_l3']].rename(
-                    columns={'team': 'opponent_team', 'pts_allowed_season': 'opp_def_season', 'pts_allowed_l3': 'opp_def_l3'}
-                )
-                
+                # Cruzamos usando el historial defensivo extraído
                 if 'opponent_team' in df_stat.columns:
                     df_stat = df_stat.merge(opp_def, on=['season', 'week', 'opponent_team'], how='left')
                     df_stat['opp_def_season'] = df_stat['opp_def_season'].fillna(21.0)
@@ -370,7 +374,6 @@ with tabs[4]:
                     
                     ou_line = float(row['total_line']) if pd.notna(row['total_line']) else 45.5
                     
-                    # Conversión idéntica al estándar Las Vegas para evaluar la combinada
                     raw_sp = float(row['spread_line']) if pd.notna(row['spread_line']) else 0.0
                     r_h_ml = float(row.get('home_moneyline', 0)) if pd.notna(row.get('home_moneyline')) else 0
                     r_a_ml = float(row.get('away_moneyline', 0)) if pd.notna(row.get('away_moneyline')) else 0
@@ -384,8 +387,6 @@ with tabs[4]:
                     
                     p_over = np.mean(res['total'] > ou_line)
                     p_under = np.mean(res['total'] < ou_line)
-                    
-                    # Corrección del Spread con la inversa del signo para el Local
                     p_cov_h = np.mean(res['diff'] > -spread_line)
                     p_cov_a = np.mean(res['diff'] < -spread_line)
                     
@@ -495,4 +496,3 @@ with tabs[7]:
             })
         
         st.dataframe(pd.DataFrame(diag_data), use_container_width=True)
-        
