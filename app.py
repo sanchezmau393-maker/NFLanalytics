@@ -54,11 +54,13 @@ with st.spinner("Cargando momentum y modelos predictivos (solo toma unos segundo
     m_home, m_away, feat_cols, std_home, std_away, metrics = entrenar_modelos_ml(matchups)
 
 seasons_in_data = sorted(schedules['season'].dropna().unique(), reverse=True)
-recent_years = [int(seasons_in_data[0])]
-if len(seasons_in_data) > 1:
-    recent_years.append(int(seasons_in_data[1]))
+curr_year = int(seasons_in_data[0])
 
-weekly_data = data_loader.get_weekly_stats(recent_years)
+# Solicitamos los últimos 4 años (ej. 2026, 2025, 2024, 2023)
+# Esto asegura un historial robusto para que el Machine Learning no descarte jugadores
+target_years = [curr_year, curr_year - 1, curr_year - 2, curr_year - 3]
+
+weekly_data = data_loader.load_all_player_stats(target_years)
 
 # --- BARRA LATERAL ---
 st.sidebar.header("⚙️ Configuración")
