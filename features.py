@@ -31,7 +31,8 @@ def build_features(schedules):
         g['pts_allowed_l5'] = g['pts_allowed'].shift(1).rolling(5, min_periods=1).mean()
         return g
         
-    team_games = team_games.groupby(['season', 'team'], group_keys=False).apply(roll_stats)
+    # Agrupamos y reseteamos el índice para evitar que las columnas desaparezcan y causen un KeyError
+    team_games = team_games.groupby(['season', 'team'], group_keys=False).apply(roll_stats).reset_index(drop=True)
     
     # Cálculo de momentum (Tendencia reciente vs promedio de temporada)
     team_games['momentum_off'] = team_games['pts_scored_l3'] - team_games['pts_scored_season']
@@ -50,14 +51,27 @@ def build_features(schedules):
 def prepare_matchup_data(schedules, team_games):
     df = schedules.copy()
     
-    # Hacemos merge de las estadísticas del equipo local
-    h_feats = team_games[team_games['is_home'] == 1].drop(columns=['is_home', 'pts_scored', 'pts_allowed'])
-    h_feats.columns = [f"home_{c}" if c not in ['game_id', 'season', 'week', 'team'] else c for c in h_feats.columns]
-    df = df.merge(h_feats, left_on=['game_id', 'season', 'week', 'home_team'], right_on=['game_id', 'season', 'week', 'team'], how='left').drop(columns=['team'])
+    # Aseguramos que el índice esté limpio antes de cruzar datos
+    team_games = team_games.reset_index(drop=True)
     
-    # Hacemos merge de las estadísticas del equipo visitante
-    a_feats = team_games[team_games['is_home'] == 0].drop(columns=['is_home', 'pts_scored', 'pts_allowed'])
-    a_feats.columns = [f"away_{c}" if c not in ['game_id', 'season', 'week', 'team'] else c for c in a_feats.columns]
-    df = df.merge(a_feats, left_on=['game_id', 'season', 'week', 'away_team'], right_on=['game_id', 'season', 'week', 'team'], how='left').drop(columns=['team'])
+    # --- DATOS DEL EQUIPO LOCAL ---
+    h_feats = team_games[team_games['is_home'] == 1].copy()
+    
+    # Eliminamos columnas innecesarias para evitar cruces erróneos
+    cols_to_drop = ['is_home', 'pts_scored', 'pts_allowed', 'season', 'week', 'team']
+    h_feats = h_feats.drop(columns=[c for c in cols_to_drop if c in h_feats.columns])
+    
+    # Renombramos añadiendo 'home_' a todo excepto al game_id (llave principal)
+    h_feats.columns = [f"home_{c}" if c != 'game_id' else c for c in h_feats.columns]
+    
+    # Unimos usando SOLO el game_id (identificador único del partido)
+    df = df.merge(h_feats, on='game_id', how='left')
+    
+    # --- DATOS DEL EQUIPO VISITANTE ---
+    a_feats = team_games[team_games['is_home'] == 0].copy()
+    a_feats = a_feats.drop(columns=[c for c in cols_to_drop if c in a_feats.columns])
+    
+    a_feats.columns = [f"away_{c}" if c != 'game_id' else c for c in a_feats.columns]
+    df = df.merge(a_feats, on='game_id', how='left')
     
     return df
