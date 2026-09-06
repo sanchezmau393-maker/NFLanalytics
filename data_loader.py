@@ -3,7 +3,7 @@ import nfl_data_py as nfl
 import pandas as pd
 
 @st.cache_data(show_spinner=False)
-def load_historical_schedules(start_year=2015, end_year=2025):
+def load_historical_schedules(start_year=2015, end_year=2026):
     try:
         years = list(range(start_year, end_year + 1))
         df = nfl.import_schedules(years)
