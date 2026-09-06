@@ -4,6 +4,7 @@ import numpy as np
 from scipy.stats import norm
 import itertools
 from operator import itemgetter
+from sklearn.linear_model import Ridge
 import data_loader
 import features
 import model
@@ -19,20 +20,19 @@ def select_game(game_id):
     st.session_state.selected_game_id = game_id
 
 def get_ml_odds(american_odds, prob):
-    """Convierte momio americano a decimal o calcula cuota justa si no hay momio de Vegas."""
     if pd.notna(american_odds) and american_odds != "" and american_odds != 0:
         try:
             odds = float(american_odds)
             if odds > 0: return (odds / 100.0) + 1.0
             if odds < 0: return (100.0 / abs(odds)) + 1.0
         except: pass
-    # Fallback: Cuota justa calculada por el modelo si la casa de apuestas aún no abre la línea
     return max(1.05, 1.0 / prob) if prob > 0 else 1.05
 
 @st.cache_data(show_spinner=False)
 def preparar_datos_y_momentum(schedules):
     t_games = features.build_features(schedules)
-    return features.prepare_matchup_data(schedules, t_games)
+    matchups = features.prepare_matchup_data(schedules, t_games)
+    return matchups, t_games
 
 @st.cache_resource(show_spinner=False)
 def entrenar_modelos_ml(matchups):
@@ -48,9 +48,9 @@ with st.spinner("Descargando calendarios e históricos de la NFL..."):
         st.error("Error al obtener los calendarios. Por favor recarga la página.")
         st.stop()
 
-# --- 2. INGENIERÍA DE CARACTERÍSTICAS Y ENTRENAMIENTO (CON PRECARGA) ---
+# --- 2. INGENIERÍA DE CARACTERÍSTICAS Y ENTRENAMIENTO ---
 with st.spinner("Cargando momentum y modelos predictivos (solo toma unos segundos la primera vez)..."):
-    matchups = preparar_datos_y_momentum(schedules)
+    matchups, team_games = preparar_datos_y_momentum(schedules)
     m_home, m_away, feat_cols, std_home, std_away, metrics = entrenar_modelos_ml(matchups)
 
 seasons_in_data = sorted(schedules['season'].dropna().unique(), reverse=True)
@@ -72,7 +72,6 @@ default_week = int(unplayed['week'].min()) if not unplayed.empty else (weeks_ava
 
 selected_week = st.sidebar.selectbox("Semana:", weeks_avail, index=weeks_avail.index(default_week) if default_week in weeks_avail else 0)
 
-# CAMBIO 1: Se agrega "🐛 Diagnóstico" a la lista de pestañas
 tabs = st.tabs([
     "📅 Cartelera", 
     "🔮 Predicción", 
@@ -81,7 +80,7 @@ tabs = st.tabs([
     "🔗 Combinadas",
     "📊 Registro", 
     "📈 Info Modelo",
-    "🐛 Diagnóstico" 
+    "🐛 Diagnóstico"
 ])
 
 week_games = season_data[season_data['week'] == selected_week]
@@ -105,7 +104,7 @@ with tabs[0]:
                 
                 if st.button(f"Analizar {row['away_team']} vs {row['home_team']}", key=f"btn_{row['game_id']}", use_container_width=True):
                     select_game(row['game_id'])
-                    st.success("¡Partido seleccionado! Pasa a la pestaña '🔮 Predicción'.")
+                    st.success("¡Partido seleccionado! Pasa a la pestaña '🔮 Predicción' o '🏃 Player Props'.")
 
 # --- PESTAÑA 2: PREDICCIÓN ---
 with tabs[1]:
@@ -221,23 +220,46 @@ with tabs[2]:
         weekly_acc = valid_games.groupby('week')['is_correct'].mean() * 100
         st.line_chart(weekly_acc)
 
-# --- PESTAÑA 4: PLAYER PROPS ---
+# --- PESTAÑA 4: PLAYER PROPS CON MACHINE LEARNING (CONTEXTUAL) ---
 with tabs[3]:
-    st.header("🏃 Player Props (Probabilidades por Jugador)")
-    if weekly_data.empty:
+    st.header("🏃 Player Props ML (Contexto del Partido)")
+    if not st.session_state.selected_game_id:
+        st.info("👈 Selecciona primero un partido desde la pestaña '📅 Cartelera' para analizar a los jugadores contra la defensa rival correspondiente.")
+    elif weekly_data.empty:
         st.warning("No hay datos de jugadores disponibles actualmente.")
     else:
-        teams_avail = sorted(weekly_data['recent_team'].dropna().unique())
-        col_p1, col_p2 = st.columns(2)
-        selected_team = col_p1.selectbox("Selecciona Equipo:", teams_avail)
-        team_players = weekly_data[weekly_data['recent_team'] == selected_team]
-        player_names = sorted(team_players['player_display_name'].dropna().unique())
-        selected_player = col_p2.selectbox("Selecciona Jugador:", player_names)
+        g_prop = matchups[matchups['game_id'] == st.session_state.selected_game_id].iloc[0]
         
-        p_data = team_players[team_players['player_display_name'] == selected_player]
-        if not p_data.empty:
+        t_home = g_prop['home_team']
+        t_away = g_prop['away_team']
+        
+        col_p1, col_p2 = st.columns(2)
+        selected_team = col_p1.selectbox("Selecciona Equipo:", [t_away, t_home])
+        
+        # Identificar al rival y su fuerza defensiva actual
+        if selected_team == t_home:
+            opp_team = t_away
+            curr_opp_def_season = g_prop.get('away_pts_allowed_season', 21.0)
+            curr_opp_def_l3 = g_prop.get('away_pts_allowed_l3', 21.0)
+        else:
+            opp_team = t_home
+            curr_opp_def_season = g_prop.get('home_pts_allowed_season', 21.0)
+            curr_opp_def_l3 = g_prop.get('home_pts_allowed_l3', 21.0)
+        
+        # Filtrar solo jugadores con al menos 3 partidos jugados (elimina novatos sin datos)
+        team_players = weekly_data[weekly_data['recent_team'] == selected_team]
+        valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
+        
+        if valid_players.empty:
+            st.warning("Los jugadores de este equipo no tienen el historial mínimo (3 partidos) para entrenar el modelo.")
+        else:
+            player_names = sorted(valid_players['player_display_name'].unique())
+            selected_player = col_p2.selectbox("Selecciona Jugador:", player_names)
+            
+            p_data = valid_players[valid_players['player_display_name'] == selected_player]
             pos = p_data['position'].iloc[0]
-            st.markdown(f"### Análisis de {selected_player} ({pos})")
+            
+            st.markdown(f"### Análisis Predictivo: {selected_player} ({pos}) vs Defensa de {opp_team}")
             
             metrics_list = []
             if pos == 'QB': metrics_list = [('passing_yards', 'Yardas por Pase'), ('attempts', 'Intentos de Pase')]
@@ -250,13 +272,60 @@ with tabs[3]:
             df_props = pd.DataFrame({"Probabilidad (OVER)": labels})
             
             for col_stat, stat_name in metrics_list:
-                stat_values = p_data[col_stat].dropna()
-                if len(stat_values) >= 2:
-                    mu, sigma = stat_values.mean(), stat_values.std()
-                    sigma = 0.1 if sigma == 0 or np.isnan(sigma) else sigma
-                    lines = [max(0, np.round(norm.ppf(1 - p, loc=mu, scale=sigma), 1)) for p in probs]
-                    df_props[f"Línea de {stat_name}"] = lines
-                    st.caption(f"**{stat_name}:** Promedio {mu:.1f} | Desviación {sigma:.1f}")
+                df_stat = p_data.copy().sort_values(['season', 'week'])
+                df_stat['stat'] = df_stat[col_stat]
+                df_stat = df_stat.dropna(subset=['stat'])
+                
+                if len(df_stat) < 3:
+                    st.caption(f"*Historial insuficiente para calcular {stat_name}*")
+                    continue
+                
+                # Construir características del jugador
+                df_stat['roll_3'] = df_stat['stat'].shift(1).rolling(3, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
+                df_stat['roll_season'] = df_stat['stat'].shift(1).rolling(17, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
+                
+                # Cruzar con la defensa histórica de cada rival que enfrentó
+                opp_def = team_games[['season', 'week', 'team', 'pts_allowed_season', 'pts_allowed_l3']].rename(
+                    columns={'team': 'opponent_team', 'pts_allowed_season': 'opp_def_season', 'pts_allowed_l3': 'opp_def_l3'}
+                )
+                
+                if 'opponent_team' in df_stat.columns:
+                    df_stat = df_stat.merge(opp_def, on=['season', 'week', 'opponent_team'], how='left')
+                    df_stat['opp_def_season'] = df_stat['opp_def_season'].fillna(21.0)
+                    df_stat['opp_def_l3'] = df_stat['opp_def_l3'].fillna(21.0)
+                else:
+                    df_stat['opp_def_season'] = 21.0
+                    df_stat['opp_def_l3'] = 21.0
+                
+                X_train = df_stat[['roll_3', 'roll_season', 'opp_def_season', 'opp_def_l3']].fillna(0)
+                y_train = df_stat['stat']
+                
+                # Entrenamiento Ridge Regression
+                ml_model = Ridge(random_state=42)
+                ml_model.fit(X_train, y_train)
+                
+                preds = ml_model.predict(X_train)
+                std_resid = np.std(y_train - preds)
+                if std_resid < 0.1 or np.isnan(std_resid): std_resid = df_stat['stat'].std() + 0.1
+                
+                # Predicción para el partido seleccionado
+                curr_r3 = df_stat['stat'].rolling(3, min_periods=1).mean().iloc[-1]
+                curr_rs = df_stat['stat'].rolling(17, min_periods=1).mean().iloc[-1]
+                
+                X_curr = pd.DataFrame({
+                    'roll_3': [curr_r3],
+                    'roll_season': [curr_rs],
+                    'opp_def_season': [curr_opp_def_season],
+                    'opp_def_l3': [curr_opp_def_l3]
+                }).fillna(0)
+                
+                pred_mu = max(0, ml_model.predict(X_curr)[0])
+                
+                # Generar líneas contextuales
+                lines = [max(0, np.round(norm.ppf(1 - p, loc=pred_mu, scale=std_resid), 1)) for p in probs]
+                df_props[f"Línea de {stat_name}"] = lines
+                st.caption(f"**{stat_name}** | Proyección Base ML: {pred_mu:.1f} | Desviación Contextual: {std_resid:.1f}")
+                
             st.dataframe(df_props, use_container_width=True, hide_index=True)
 
 # --- PESTAÑA 5: COMBINADAS INTELIGENTES ---
@@ -266,23 +335,21 @@ with tabs[4]:
     if week_games.empty:
         st.info("No hay partidos pendientes para analizar en esta semana.")
     else:
-        st.write("Selecciona tu nivel de riesgo. El algoritmo calculará todas las combinaciones posibles de la semana actual respetando las reglas de Las Vegas (no ML + Spread del mismo juego) y te ofrecerá aquellas que tienen el mayor beneficio esperado (Expected Value).")
+        st.write("El algoritmo calculará opciones utilizando **ÚNICAMENTE** selecciones donde el modelo tiene alta confianza matemática (Probabilidades superiores al 55%). Si los partidos son muy cerrados, el modelo se abstendrá de recomendar.")
         
         c1, c2 = st.columns(2)
         riesgo = c1.selectbox("Nivel de Riesgo (Prob. de éxito de la combinada):", [
             "Muy Conservadora (Prob. 25% - 40%)",
             "Equilibrada (Prob. 10% - 25%)",
-            "Arriesgada (Prob. 3% - 10%)",
-            "Lotería (Prob. < 3%)"
+            "Arriesgada (Prob. 3% - 10%)"
         ])
         
         lista_juegos = ["Ninguno"] + [f"{r['away_team']} @ {r['home_team']}" for _, r in week_games.iterrows()]
         juego_obligatorio = c2.selectbox("Incluir un partido obligatoriamente:", lista_juegos)
         
         if st.button("🚀 Generar Opciones de Combinadas", type="primary"):
-            with st.spinner("Simulando miles de combinaciones..."):
+            with st.spinner("Buscando las selecciones más fuertes..."):
                 all_picks = []
-                # 1. Extraer probabilidades de todos los juegos de la semana
                 for _, row in week_games.iterrows():
                     match_data = matchups[matchups['game_id'] == row['game_id']].iloc[0]
                     X_m = match_data[feat_cols].to_frame().T.fillna(0)
@@ -302,21 +369,28 @@ with tabs[4]:
                     gid = row['game_id']
                     m_str = f"{row['away_team']} @ {row['home_team']}"
                     
-                    all_picks.append({'id': f"{gid}_ML_H", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['home_team']}", 'prob': res['prob_home'], 'odds': get_ml_odds(row.get('home_moneyline'), res['prob_home'])})
-                    all_picks.append({'id': f"{gid}_ML_A", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['away_team']}", 'prob': res['prob_away'], 'odds': get_ml_odds(row.get('away_moneyline'), res['prob_away'])})
-                    all_picks.append({'id': f"{gid}_SP_H", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['home_team']} cubre Spread ({spread_line})", 'prob': p_cov_h, 'odds': 1.91})
-                    all_picks.append({'id': f"{gid}_SP_A", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['away_team']} cubre Spread ({-spread_line})", 'prob': p_cov_a, 'odds': 1.91})
-                    all_picks.append({'id': f"{gid}_OU_O", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"OVER {ou_line}", 'prob': p_over, 'odds': 1.91})
-                    all_picks.append({'id': f"{gid}_OU_U", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"UNDER {ou_line}", 'prob': p_under, 'odds': 1.91})
+                    # FILTRO DE CONFIANZA: Ignorar todo lo que el modelo considere "volado" (< 55%)
+                    if res['prob_home'] >= 0.55:
+                        all_picks.append({'id': f"{gid}_ML_H", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['home_team']}", 'prob': res['prob_home'], 'odds': get_ml_odds(row.get('home_moneyline'), res['prob_home'])})
+                    if res['prob_away'] >= 0.55:
+                        all_picks.append({'id': f"{gid}_ML_A", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['away_team']}", 'prob': res['prob_away'], 'odds': get_ml_odds(row.get('away_moneyline'), res['prob_away'])})
+                    
+                    if p_cov_h >= 0.55:
+                        all_picks.append({'id': f"{gid}_SP_H", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['home_team']} cubre Spread ({spread_line})", 'prob': p_cov_h, 'odds': 1.91})
+                    if p_cov_a >= 0.55:
+                        all_picks.append({'id': f"{gid}_SP_A", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['away_team']} cubre Spread ({-spread_line})", 'prob': p_cov_a, 'odds': 1.91})
+                    
+                    if p_over >= 0.55:
+                        all_picks.append({'id': f"{gid}_OU_O", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"OVER {ou_line}", 'prob': p_over, 'odds': 1.91})
+                    if p_under >= 0.55:
+                        all_picks.append({'id': f"{gid}_OU_U", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"UNDER {ou_line}", 'prob': p_under, 'odds': 1.91})
                 
                 valid_parlays = []
-                # 2. Generar combinaciones de 2 y 3 selecciones
                 for k in [2, 3]:
                     for combo in itertools.combinations(all_picks, k):
                         if juego_obligatorio != "Ninguno" and juego_obligatorio not in [p['match'] for p in combo]:
                             continue
                             
-                        # Validación de Reglas: Máximo 1 ML/Spread por juego (Evitar conflicto) y máximo 1 O/U por juego
                         is_valid = True
                         g_types = {}
                         for p in combo:
@@ -331,29 +405,26 @@ with tabs[4]:
                         
                         c_prob = np.prod([p['prob'] for p in combo])
                         c_odds = np.prod([p['odds'] for p in combo])
-                        c_ev = (c_prob * c_odds) - 1 # Expected Value
+                        c_ev = (c_prob * c_odds) - 1
                         
-                        # Filtro de Riesgo
                         if "Conservadora" in riesgo and not (0.25 <= c_prob <= 0.40): continue
                         if "Equilibrada" in riesgo and not (0.10 <= c_prob < 0.25): continue
                         if "Arriesgada" in riesgo and not (0.03 <= c_prob < 0.10): continue
-                        if "Lotería" in riesgo and c_prob >= 0.03: continue
                         
                         valid_parlays.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'ev': c_ev})
 
                 if not valid_parlays:
-                    st.warning("No se encontraron combinadas que cumplan estrictamente con ese nivel de riesgo y reglas. Intenta cambiar el riesgo.")
+                    st.warning("No se encontraron combinadas sólidas. El modelo es exigente y en esta semana los partidos no superan el filtro de confianza matemática para el riesgo seleccionado.")
                 else:
-                    # Ordenar por el mejor Expected Value (El mejor beneficio en relación a su riesgo)
                     valid_parlays.sort(key=itemgetter('ev'), reverse=True)
                     top_parlays = valid_parlays[:8]
                     
-                    st.success(f"Se generaron las mejores {len(top_parlays)} opciones optimizadas:")
+                    st.success(f"Se generaron las {len(top_parlays)} mejores opciones basadas en ventajas reales del modelo:")
                     for i, parl in enumerate(top_parlays):
-                        with st.expander(f"⭐ Opción {i+1} | Probabilidad: {parl['prob']*100:.1f}% | Pago: x{parl['odds']:.2f}"):
+                        with st.expander(f"⭐ Opción {i+1} | Probabilidad Real: {parl['prob']*100:.1f}% | Pago: x{parl['odds']:.2f}"):
                             for leg in parl['combo']:
-                                st.markdown(f"- **{leg['match']}**: {leg['desc']} *(Cuota: {leg['odds']:.2f})*")
-                            st.caption(f"Beneficio Esperado (EV): {parl['ev']:.3f} (Mientras mayor sea el número, mejor valor tiene contra la casa de apuestas).")
+                                st.markdown(f"- **{leg['match']}**: {leg['desc']} *(Prob. Individual: {leg['prob']*100:.1f}%)*")
+                            st.caption(f"Beneficio Esperado (EV): {parl['ev']:.3f}")
 
 # --- PESTAÑA 6: REGISTRO HISTÓRICO ---
 with tabs[5]:
@@ -371,7 +442,6 @@ with tabs[6]:
     c1.metric("MAE Local (Error promedio)", f"{metrics['mae_home']:.2f} pts")
     c2.metric("MAE Visitante (Error promedio)", f"{metrics['mae_away']:.2f} pts")
 
-# CAMBIO 2: Lógica de la pestaña de Diagnóstico agregada al final
 # --- PESTAÑA 8: DIAGNÓSTICO ---
 with tabs[7]:
     st.header("🐛 Diagnóstico de Características y Predicciones Base")
@@ -388,7 +458,6 @@ with tabs[7]:
             p_h = max(0, m_home.predict(X_diag)[0])
             p_a = max(0, m_away.predict(X_diag)[0])
             
-            # Simulación rápida (solo para lectura visual en diagnóstico)
             res_diag = monte_carlo.run_simulation(p_h, p_a, std_home, std_away, n_sims=1000)
             
             diag_data.append({
