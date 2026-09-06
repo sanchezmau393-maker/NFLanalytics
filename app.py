@@ -162,10 +162,22 @@ with tabs[1]:
             col_L1, col_L2, col_L3 = st.columns(3)
             
             auto_ou = float(g['total_line']) if pd.notna(g['total_line']) else 45.5
-            auto_spread = float(g['spread_line']) if pd.notna(g['spread_line']) else 0.0
+            
+            # CONVERSIÓN DE SPREAD AL ESTÁNDAR LAS VEGAS (Favorito = Negativo)
+            raw_sp = float(g['spread_line']) if pd.notna(g['spread_line']) else 0.0
+            h_ml = float(g.get('home_moneyline', 0)) if pd.notna(g.get('home_moneyline')) else 0
+            a_ml = float(g.get('away_moneyline', 0)) if pd.notna(g.get('away_moneyline')) else 0
+            
+            if h_ml < 0 and a_ml > 0:
+                auto_spread = -abs(raw_sp) # Local favorito
+            elif a_ml < 0 and h_ml > 0:
+                auto_spread = abs(raw_sp)  # Local underdog
+            else:
+                # Fallback estándar si no hay MoneyLine
+                auto_spread = -raw_sp if raw_sp != 0 else 0.0
             
             ou_line = col_L1.number_input("Línea Over/Under:", value=auto_ou)
-            spread_line = col_L2.number_input("Spread Local:", value=auto_spread)
+            spread_line = col_L2.number_input("Spread Local (Favorito es Negativo):", value=auto_spread)
             n_sims = col_L3.selectbox("Simulaciones:", [1000, 10000, 50000], index=1)
 
             if st.button("🚀 Ejecutar Predicción", type="primary"):
@@ -180,7 +192,8 @@ with tabs[1]:
                 
                 prob_over = np.mean(res['total'] > ou_line)
                 prob_under = np.mean(res['total'] < ou_line)
-                prob_cover = np.mean(res['diff'] > spread_line)
+                # Corrección matemática para Spread estándar Las Vegas (-spread_line compensa el signo)
+                prob_cover = np.mean(res['diff'] > -spread_line)
                 
                 st.markdown(f"**Over {ou_line}:** {prob_over*100:.1f}% | **Under {ou_line}:** {prob_under*100:.1f}%")
                 st.markdown(f"**Probabilidad {g['home_team']} cubre Spread ({spread_line}):** {prob_cover*100:.1f}%")
@@ -246,7 +259,7 @@ with tabs[3]:
             curr_opp_def_season = g_prop.get('home_pts_allowed_season', 21.0)
             curr_opp_def_l3 = g_prop.get('home_pts_allowed_l3', 21.0)
         
-        # Filtrar solo jugadores con al menos 3 partidos jugados (elimina novatos sin datos)
+        # Filtrar solo jugadores con al menos 3 partidos jugados
         team_players = weekly_data[weekly_data['recent_team'] == selected_team]
         valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
         
@@ -280,11 +293,9 @@ with tabs[3]:
                     st.caption(f"*Historial insuficiente para calcular {stat_name}*")
                     continue
                 
-                # Construir características del jugador
                 df_stat['roll_3'] = df_stat['stat'].shift(1).rolling(3, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
                 df_stat['roll_season'] = df_stat['stat'].shift(1).rolling(17, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
                 
-                # Cruzar con la defensa histórica de cada rival que enfrentó
                 opp_def = team_games[['season', 'week', 'team', 'pts_allowed_season', 'pts_allowed_l3']].rename(
                     columns={'team': 'opponent_team', 'pts_allowed_season': 'opp_def_season', 'pts_allowed_l3': 'opp_def_l3'}
                 )
@@ -300,7 +311,6 @@ with tabs[3]:
                 X_train = df_stat[['roll_3', 'roll_season', 'opp_def_season', 'opp_def_l3']].fillna(0)
                 y_train = df_stat['stat']
                 
-                # Entrenamiento Ridge Regression
                 ml_model = Ridge(random_state=42)
                 ml_model.fit(X_train, y_train)
                 
@@ -308,7 +318,6 @@ with tabs[3]:
                 std_resid = np.std(y_train - preds)
                 if std_resid < 0.1 or np.isnan(std_resid): std_resid = df_stat['stat'].std() + 0.1
                 
-                # Predicción para el partido seleccionado
                 curr_r3 = df_stat['stat'].rolling(3, min_periods=1).mean().iloc[-1]
                 curr_rs = df_stat['stat'].rolling(17, min_periods=1).mean().iloc[-1]
                 
@@ -321,7 +330,6 @@ with tabs[3]:
                 
                 pred_mu = max(0, ml_model.predict(X_curr)[0])
                 
-                # Generar líneas contextuales
                 lines = [max(0, np.round(norm.ppf(1 - p, loc=pred_mu, scale=std_resid), 1)) for p in probs]
                 df_props[f"Línea de {stat_name}"] = lines
                 st.caption(f"**{stat_name}** | Proyección Base ML: {pred_mu:.1f} | Desviación Contextual: {std_resid:.1f}")
@@ -359,17 +367,29 @@ with tabs[4]:
                     res = monte_carlo.run_simulation(p_h, p_a, std_home, std_away, n_sims=2000)
                     
                     ou_line = float(row['total_line']) if pd.notna(row['total_line']) else 45.5
-                    spread_line = float(row['spread_line']) if pd.notna(row['spread_line']) else 0.0
+                    
+                    # Conversión idéntica al estándar Las Vegas para evaluar la combinada
+                    raw_sp = float(row['spread_line']) if pd.notna(row['spread_line']) else 0.0
+                    r_h_ml = float(row.get('home_moneyline', 0)) if pd.notna(row.get('home_moneyline')) else 0
+                    r_a_ml = float(row.get('away_moneyline', 0)) if pd.notna(row.get('away_moneyline')) else 0
+                    
+                    if r_h_ml < 0 and r_a_ml > 0:
+                        spread_line = -abs(raw_sp)
+                    elif r_a_ml < 0 and r_h_ml > 0:
+                        spread_line = abs(raw_sp)
+                    else:
+                        spread_line = -raw_sp if raw_sp != 0 else 0.0
                     
                     p_over = np.mean(res['total'] > ou_line)
                     p_under = np.mean(res['total'] < ou_line)
-                    p_cov_h = np.mean(res['diff'] > spread_line)
-                    p_cov_a = np.mean(res['diff'] < spread_line)
+                    
+                    # Corrección del Spread con la inversa del signo para el Local
+                    p_cov_h = np.mean(res['diff'] > -spread_line)
+                    p_cov_a = np.mean(res['diff'] < -spread_line)
                     
                     gid = row['game_id']
                     m_str = f"{row['away_team']} @ {row['home_team']}"
                     
-                    # FILTRO DE CONFIANZA: Ignorar todo lo que el modelo considere "volado" (< 55%)
                     if res['prob_home'] >= 0.55:
                         all_picks.append({'id': f"{gid}_ML_H", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['home_team']}", 'prob': res['prob_home'], 'odds': get_ml_odds(row.get('home_moneyline'), res['prob_home'])})
                     if res['prob_away'] >= 0.55:
