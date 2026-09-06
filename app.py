@@ -16,6 +16,16 @@ if 'selected_game_id' not in st.session_state:
 def select_game(game_id):
     st.session_state.selected_game_id = game_id
 
+# --- FUNCIONES DE MEMORIA (CACHÉ) PARA EVITAR TIEMPOS DE CARGA ---
+@st.cache_data(show_spinner=False)
+def preparar_datos_y_momentum(schedules):
+    t_games = features.build_features(schedules)
+    return features.prepare_matchup_data(schedules, t_games)
+
+@st.cache_resource(show_spinner=False)
+def entrenar_modelos_ml(matchups):
+    return model.train_models(matchups)
+
 st.title("🏈 NFL Analytics Pro")
 st.markdown("Análisis avanzado, predicción objetiva de bajas y Player Props mediante Machine Learning y Monte Carlo.")
 
@@ -26,11 +36,10 @@ with st.spinner("Descargando calendarios e históricos de la NFL..."):
         st.error("Error al obtener los calendarios. Por favor recarga la página.")
         st.stop()
 
-# --- 2. INGENIERÍA DE CARACTERÍSTICAS Y ENTRENAMIENTO ---
-with st.spinner("Procesando momentum y modelos predictivos..."):
-    team_games = features.build_features(schedules)
-    matchups = features.prepare_matchup_data(schedules, team_games)
-    m_home, m_away, feat_cols, std_home, std_away, metrics = model.train_models(matchups)
+# --- 2. INGENIERÍA DE CARACTERÍSTICAS Y ENTRENAMIENTO (CON PRECARGA) ---
+with st.spinner("Cargando momentum y modelos predictivos (solo toma unos segundos la primera vez)..."):
+    matchups = preparar_datos_y_momentum(schedules)
+    m_home, m_away, feat_cols, std_home, std_away, metrics = entrenar_modelos_ml(matchups)
 
 # Cargar datos de jugadores para lesiones y props (últimas temporadas)
 seasons_in_data = sorted(schedules['season'].dropna().unique(), reverse=True)
