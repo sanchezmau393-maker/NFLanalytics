@@ -72,6 +72,7 @@ default_week = int(unplayed['week'].min()) if not unplayed.empty else (weeks_ava
 
 selected_week = st.sidebar.selectbox("Semana:", weeks_avail, index=weeks_avail.index(default_week) if default_week in weeks_avail else 0)
 
+# CAMBIO 1: Se agrega "🐛 Diagnóstico" a la lista de pestañas
 tabs = st.tabs([
     "📅 Cartelera", 
     "🔮 Predicción", 
@@ -79,7 +80,8 @@ tabs = st.tabs([
     "🏃 Player Props",
     "🔗 Combinadas",
     "📊 Registro", 
-    "📈 Info Modelo"
+    "📈 Info Modelo",
+    "🐛 Diagnóstico" 
 ])
 
 week_games = season_data[season_data['week'] == selected_week]
@@ -368,3 +370,38 @@ with tabs[6]:
     c1, c2 = st.columns(2)
     c1.metric("MAE Local (Error promedio)", f"{metrics['mae_home']:.2f} pts")
     c2.metric("MAE Visitante (Error promedio)", f"{metrics['mae_away']:.2f} pts")
+
+# CAMBIO 2: Lógica de la pestaña de Diagnóstico agregada al final
+# --- PESTAÑA 8: DIAGNÓSTICO ---
+with tabs[7]:
+    st.header("🐛 Diagnóstico de Características y Predicciones Base")
+    st.write(f"Monitor de variables para: Temporada {selected_season} - Semana {selected_week}")
+    
+    if week_games.empty:
+        st.info("No hay partidos en esta semana.")
+    else:
+        diag_data = []
+        for _, row in week_games.iterrows():
+            g_diag = matchups[matchups['game_id'] == row['game_id']].iloc[0]
+            X_diag = g_diag[feat_cols].to_frame().T.fillna(0)
+            
+            p_h = max(0, m_home.predict(X_diag)[0])
+            p_a = max(0, m_away.predict(X_diag)[0])
+            
+            # Simulación rápida (solo para lectura visual en diagnóstico)
+            res_diag = monte_carlo.run_simulation(p_h, p_a, std_home, std_away, n_sims=1000)
+            
+            diag_data.append({
+                "Partido": f"{row['away_team']} @ {row['home_team']}",
+                "Pred. Local Base": round(p_h, 2),
+                "Pred. Vis Base": round(p_a, 2),
+                "Prob. Local": f"{res_diag['prob_home']*100:.1f}%",
+                "Prob. Vis": f"{res_diag['prob_away']*100:.1f}%",
+                "Pts Temp Local": round(g_diag.get('home_pts_scored_season', 0), 2),
+                "Mom. Off Local": round(g_diag.get('home_momentum_off', 0), 2),
+                "Pts Temp Vis": round(g_diag.get('away_pts_scored_season', 0), 2),
+                "Mom. Off Vis": round(g_diag.get('away_momentum_off', 0), 2)
+            })
+        
+        st.dataframe(pd.DataFrame(diag_data), use_container_width=True)
+        
