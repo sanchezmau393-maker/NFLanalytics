@@ -1,52 +1,52 @@
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
+from sklearn.linear_model import Lasso
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.model_selection import KFold, cross_val_predict
 
-def train_models(matchup_df):
-    # Entrenamos solo con partidos que ya tienen resultado
+def walk_forward_validation(matchup_df, features):
     train_df = matchup_df.dropna(subset=['home_score', 'away_score']).copy()
+    train_df = train_df.sort_values(['season', 'week'])
     
-    features = [
-        'home_pts_scored_season', 'home_pts_allowed_season',
-        'home_pts_scored_l3', 'home_pts_allowed_l3',
-        'home_momentum_off', 'home_momentum_def',
-        'away_pts_scored_season', 'away_pts_allowed_season',
-        'away_pts_scored_l3', 'away_pts_allowed_l3',
-        'away_momentum_off', 'away_momentum_def'
-    ]
+    seasons = sorted(train_df['season'].unique())
     
-    X = train_df[features].fillna(0)
-    y_home = train_df['home_score']
-    y_away = train_df['away_score']
-    
-    # HistGradientBoosting es robusto y soporta NaNs nativamente
-    model_home = HistGradientBoostingRegressor(random_state=42, max_iter=150, min_samples_leaf=10)
-    model_home.fit(X, y_home)
-    
-    model_away = HistGradientBoostingRegressor(random_state=42, max_iter=150, min_samples_leaf=10)
-    model_away.fit(X, y_away)
-    
-    # Predicciones dentro de muestra (para métricas de desempeño base)
-    preds_home_insample = model_home.predict(X)
-    preds_away_insample = model_away.predict(X)
-    
-    # NUEVO: Validación cruzada para calcular una varianza (Out-of-Sample) realista
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-    preds_home_oos = cross_val_predict(model_home, X, y_home, cv=kf)
-    preds_away_oos = cross_val_predict(model_away, X, y_away, cv=kf)
-    
-    # La desviación estándar ahora refleja el verdadero margen de error del modelo
-    std_home = np.std(y_home - preds_home_oos)
-    std_away = np.std(y_away - preds_away_oos)
-    
-    # Métricas para validación (se mantienen las de muestra para referencia rápida)
-    metrics = {
-        'mae_home': mean_absolute_error(y_home, preds_home_insample),
-        'mae_away': mean_absolute_error(y_away, preds_away_insample),
-        'rmse_home': np.sqrt(mean_squared_error(y_home, preds_home_insample)),
-        'rmse_away': np.sqrt(mean_squared_error(y_away, preds_away_insample))
+    models_to_test = {
+        'HistGB': HistGradientBoostingRegressor(random_state=42, max_iter=150, min_samples_leaf=10),
+        'RandomForest': RandomForestRegressor(n_estimators=100, min_samples_leaf=5, random_state=42),
+        'Lasso': Lasso(alpha=0.1, random_state=42)
     }
     
-    return model_home, model_away, features, std_home, std_away, metrics
+    results = []
+    
+    # Entrenar iterativamente: usar temporadas 1 a T para predecir T+1
+    for i in range(1, len(seasons)):
+        train_seasons = seasons[:i]
+        test_season = seasons[i]
+        
+        df_train = train_df[train_df['season'].isin(train_seasons)]
+        df_test = train_df[train_df['season'] == test_season]
+        
+        X_train, y_train_h, y_train_a = df_train[features], df_train['home_score'], df_train['away_score']
+        X_test, y_test_h, y_test_a = df_test[features], df_test['home_score'], df_test['away_score']
+        
+        for name, model in models_to_test.items():
+            # Modelo Local
+            model.fit(X_train, y_train_h)
+            pred_h = model.predict(X_test)
+            
+            # Modelo Visitante
+            model.fit(X_train, y_train_a)
+            pred_a = model.predict(X_test)
+            
+            mae_h = mean_absolute_error(y_test_h, pred_h)
+            mae_a = mean_absolute_error(y_test_a, pred_a)
+            
+            results.append({
+                'season_tested': test_season,
+                'model': name,
+                'mae_home': mae_h,
+                'mae_away': mae_a,
+                'mae_total': (mae_h + mae_a) / 2
+            })
+            
+    return pd.DataFrame(results)
