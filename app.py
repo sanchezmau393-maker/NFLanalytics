@@ -28,7 +28,6 @@ def get_ml_odds(american_odds, prob):
         except: pass
     return max(1.05, 1.0 / prob) if prob > 0 else 1.05
 
-# Se renombró la función a get_matchups_and_features y se agregó TTL para forzar la limpieza de caché
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_matchups_and_features(schedules):
     t_games = features.build_features(schedules)
@@ -58,11 +57,9 @@ seasons_in_data = sorted(schedules['season'].dropna().unique(), reverse=True)
 curr_year = int(seasons_in_data[0])
 target_years = [curr_year, curr_year - 1, curr_year - 2, curr_year - 3]
 
-# Carga de historial de jugadores (Asegúrate de que tu data_loader.py tenga esta función actualizada del paso anterior)
 try:
     weekly_data = data_loader.load_all_player_stats(target_years)
 except AttributeError:
-    # Fallback temporal si la función no se renombró correctamente en data_loader
     weekly_data = data_loader.load_weekly_data(target_years)
 
 # --- BARRA LATERAL ---
@@ -126,8 +123,14 @@ with tabs[1]:
             st.subheader("🚑 Reporte Automático de Lesiones y Bajas")
             col_inj1, col_inj2 = st.columns(2)
             
-            roster_home = sorted(weekly_data[weekly_data['recent_team'] == g['home_team']]['player_display_name'].dropna().unique()) if not weekly_data.empty else []
-            roster_away = sorted(weekly_data[weekly_data['recent_team'] == g['away_team']]['player_display_name'].dropna().unique()) if not weekly_data.empty else []
+            # Asegurar obtener solo jugadores actuales del equipo
+            if not weekly_data.empty:
+                latest_team_map = weekly_data.sort_values(['season', 'week']).groupby('player_display_name')['recent_team'].last()
+                roster_home = sorted(latest_team_map[latest_team_map == g['home_team']].index.tolist())
+                roster_away = sorted(latest_team_map[latest_team_map == g['away_team']].index.tolist())
+            else:
+                roster_home = []
+                roster_away = []
             
             with col_inj1:
                 bajas_home = st.multiselect(f"Bajas en {g['home_team']}:", roster_home)
@@ -200,11 +203,14 @@ with tabs[1]:
                 st.markdown(f"**Over {ou_line}:** {prob_over*100:.1f}% | **Under {ou_line}:** {prob_under*100:.1f}%")
                 st.markdown(f"**Probabilidad {g['home_team']} cubre Spread ({spread_line}):** {prob_cover*100:.1f}%")
                 
+                # INTEGRACIÓN TRACKER ACTUALIZADO
                 tracker.save_prediction(
                     g['game_id'], g['season'], g['week'], g['home_team'], g['away_team'],
-                    pred_h, pred_a, res['prob_home'], res['prob_away'], ou_line, spread_line
+                    pred_h, pred_a, res['prob_home'], res['prob_away'], ou_line, spread_line,
+                    home_odds=get_ml_odds(h_ml, res['prob_home']),
+                    away_odds=get_ml_odds(a_ml, res['prob_away'])
                 )
-                st.success("✅ Predicción registrada en el historial.")
+                st.success("✅ Predicción registrada en el historial (incluyendo cuotas y EV).")
 
 # --- PESTAÑA 3: EFICIENCIA DE PREDICCIÓN ---
 with tabs[2]:
@@ -260,7 +266,11 @@ with tabs[3]:
             curr_opp_def_season = g_prop.get('home_pts_allowed_season', 21.0)
             curr_opp_def_l3 = g_prop.get('home_pts_allowed_l3', 21.0)
         
-        team_players = weekly_data[weekly_data['recent_team'] == selected_team]
+        # FILTRO ESTRICTO: Solo jugadores cuyo ÚLTIMO equipo registrado sea el seleccionado
+        latest_team_map = weekly_data.sort_values(['season', 'week']).groupby('player_display_name')['recent_team'].last()
+        valid_roster = latest_team_map[latest_team_map == selected_team].index
+        
+        team_players = weekly_data[weekly_data['player_display_name'].isin(valid_roster)]
         valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
         
         if valid_players.empty:
@@ -284,7 +294,6 @@ with tabs[3]:
             labels = ["90% (Muy Seguro)", "80%", "70%", "60%", "50% (Promedio)", "40%", "30%", "20%", "10% (Arriesgado)"]
             df_props = pd.DataFrame({"Probabilidad (OVER)": labels})
             
-            # SOLUCIÓN AL KEYERROR: Extraer defensa del rival desde 'matchups' directamente (100% seguro)
             opp_h = matchups[['season', 'week', 'home_team', 'home_pts_allowed_season', 'home_pts_allowed_l3']].copy()
             opp_h.columns = ['season', 'week', 'opponent_team', 'opp_def_season', 'opp_def_l3']
             
@@ -305,7 +314,6 @@ with tabs[3]:
                 df_stat['roll_3'] = df_stat['stat'].shift(1).rolling(3, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
                 df_stat['roll_season'] = df_stat['stat'].shift(1).rolling(17, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
                 
-                # Cruzamos usando el historial defensivo extraído
                 if 'opponent_team' in df_stat.columns:
                     df_stat = df_stat.merge(opp_def, on=['season', 'week', 'opponent_team'], how='left')
                     df_stat['opp_def_season'] = df_stat['opp_def_season'].fillna(21.0)
@@ -321,8 +329,14 @@ with tabs[3]:
                 ml_model.fit(X_train, y_train)
                 
                 preds = ml_model.predict(X_train)
+                
+                # CORRECCIÓN DE VARIANZA: Imponer un suelo (floor)
                 std_resid = np.std(y_train - preds)
-                if std_resid < 0.1 or np.isnan(std_resid): std_resid = df_stat['stat'].std() + 0.1
+                min_std = df_stat['stat'].std() * 0.60 
+                if pd.isna(min_std) or min_std < 1.0: 
+                    min_std = 5.0 # Mínimo de seguridad
+                
+                std_resid = max(std_resid, min_std)
                 
                 curr_r3 = df_stat['stat'].rolling(3, min_periods=1).mean().iloc[-1]
                 curr_rs = df_stat['stat'].rolling(17, min_periods=1).mean().iloc[-1]
@@ -336,9 +350,12 @@ with tabs[3]:
                 
                 pred_mu = max(0, ml_model.predict(X_curr)[0])
                 
+                if pred_mu < 5.0 and pos != 'QB':
+                    st.caption(f"*Proyección ML base muy baja ({pred_mu:.1f}). Varianza ajustada a {std_resid:.1f} para evitar falsos negativos.*")
+                
                 lines = [max(0, np.round(norm.ppf(1 - p, loc=pred_mu, scale=std_resid), 1)) for p in probs]
                 df_props[f"Línea de {stat_name}"] = lines
-                st.caption(f"**{stat_name}** | Proyección Base ML: {pred_mu:.1f} | Desviación Contextual: {std_resid:.1f}")
+                st.caption(f"**{stat_name}** | Proyección Base ML: {pred_mu:.1f} | Desviación Ajustada: {std_resid:.1f}")
                 
             st.dataframe(df_props, use_container_width=True, hide_index=True)
 
@@ -349,7 +366,7 @@ with tabs[4]:
     if week_games.empty:
         st.info("No hay partidos pendientes para analizar en esta semana.")
     else:
-        st.write("El algoritmo calculará opciones utilizando **ÚNICAMENTE** selecciones donde el modelo tiene alta confianza matemática (Probabilidades superiores al 55%). Si los partidos son muy cerrados, el modelo se abstendrá de recomendar.")
+        st.write("El algoritmo calculará opciones utilizando **ÚNICAMENTE** selecciones independientes (se omiten Same Game Parlays) donde el modelo tiene alta confianza matemática (Prob. > 55%).")
         
         c1, c2 = st.columns(2)
         riesgo = c1.selectbox("Nivel de Riesgo (Prob. de éxito de la combinada):", [
@@ -414,17 +431,17 @@ with tabs[4]:
                         if juego_obligatorio != "Ninguno" and juego_obligatorio not in [p['match'] for p in combo]:
                             continue
                             
+                        # CORRECCIÓN SGP: Evitar selecciones del mismo partido para no asumir falsa independencia
                         is_valid = True
-                        g_types = {}
+                        juegos_incluidos = set()
                         for p in combo:
-                            if p['game'] not in g_types: g_types[p['game']] = []
-                            g_types[p['game']].append(p['type'])
+                            if p['game'] in juegos_incluidos:
+                                is_valid = False
+                                break
+                            juegos_incluidos.add(p['game'])
                             
-                        for g_id, t_list in g_types.items():
-                            if 'ML' in t_list and 'Spread' in t_list: is_valid = False; break
-                            if t_list.count('ML') > 1 or t_list.count('Spread') > 1 or t_list.count('OU') > 1: is_valid = False; break
-                            
-                        if not is_valid: continue
+                        if not is_valid: 
+                            continue
                         
                         c_prob = np.prod([p['prob'] for p in combo])
                         c_odds = np.prod([p['odds'] for p in combo])
@@ -437,7 +454,7 @@ with tabs[4]:
                         valid_parlays.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'ev': c_ev})
 
                 if not valid_parlays:
-                    st.warning("No se encontraron combinadas sólidas. El modelo es exigente y en esta semana los partidos no superan el filtro de confianza matemática para el riesgo seleccionado.")
+                    st.warning("No se encontraron combinadas sólidas que cumplan con la independencia de eventos y el riesgo matemático solicitado.")
                 else:
                     valid_parlays.sort(key=itemgetter('ev'), reverse=True)
                     top_parlays = valid_parlays[:8]
@@ -462,8 +479,9 @@ with tabs[5]:
 with tabs[6]:
     st.header("📈 Desempeño del Modelo")
     c1, c2 = st.columns(2)
-    c1.metric("MAE Local (Error promedio)", f"{metrics['mae_home']:.2f} pts")
-    c2.metric("MAE Visitante (Error promedio)", f"{metrics['mae_away']:.2f} pts")
+    c1.metric("MAE Local (Error promedio real)", f"{metrics['mae_home']:.2f} pts")
+    c2.metric("MAE Visitante (Error promedio real)", f"{metrics['mae_away']:.2f} pts")
+    st.info("Los modelos están ajustados con validación cruzada (Out-of-Sample) para evitar el sobreajuste al calcular las simulaciones.")
 
 # --- PESTAÑA 8: DIAGNÓSTICO ---
 with tabs[7]:
