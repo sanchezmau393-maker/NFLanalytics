@@ -28,6 +28,7 @@ def get_ml_odds(american_odds, prob):
         except: pass
     return max(1.05, 1.0 / prob) if prob > 0 else 1.05
 
+# Se renombró la función a get_matchups_and_features y se agregó TTL para forzar la limpieza de caché
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_matchups_and_features(schedules):
     t_games = features.build_features(schedules)
@@ -57,13 +58,12 @@ seasons_in_data = sorted(schedules['season'].dropna().unique(), reverse=True)
 curr_year = int(seasons_in_data[0])
 target_years = [curr_year, curr_year - 1, curr_year - 2, curr_year - 3]
 
+# Carga de historial de jugadores (Asegúrate de que tu data_loader.py tenga esta función actualizada del paso anterior)
 try:
     weekly_data = data_loader.load_all_player_stats(target_years)
 except AttributeError:
+    # Fallback temporal si la función no se renombró correctamente en data_loader
     weekly_data = data_loader.load_weekly_data(target_years)
-
-# AÑADIDO: Carga de rosters para Pestaña 4
-rosters = data_loader.load_current_rosters(curr_year)
 
 # --- BARRA LATERAL ---
 st.sidebar.header("⚙️ Configuración")
@@ -235,7 +235,7 @@ with tabs[2]:
         weekly_acc = valid_games.groupby('week')['is_correct'].mean() * 100
         st.line_chart(weekly_acc)
 
-# --- PESTAÑA 4: PLAYER PROPS CON MACHINE LEARNING (AÑADIDAS MEJORAS SOLICITADAS) ---
+# --- PESTAÑA 4: PLAYER PROPS CON MACHINE LEARNING (CONTEXTUAL) ---
 with tabs[3]:
     st.header("🏃 Player Props ML (Contexto del Partido)")
     if not st.session_state.selected_game_id:
@@ -260,30 +260,18 @@ with tabs[3]:
             curr_opp_def_season = g_prop.get('home_pts_allowed_season', 21.0)
             curr_opp_def_l3 = g_prop.get('home_pts_allowed_l3', 21.0)
         
-        # MEJORA 10.1: Uso de Roster Actual y Fallback Seguro (Evita KeyError)
-        if not rosters.empty and 'team' in rosters.columns and 'player_name' in rosters.columns:
-            rosters['player_display_name'] = rosters['player_name']
-            valid_names = rosters[rosters['team'] == selected_team]['player_display_name'].dropna().unique()
-            team_players = weekly_data[weekly_data['player_display_name'].isin(valid_names)]
-        else:
-            team_players = weekly_data[weekly_data['recent_team'] == selected_team]
-            
-        valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 1)
+        team_players = weekly_data[weekly_data['recent_team'] == selected_team]
+        valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
         
         if valid_players.empty:
-            st.warning("No se encontraron jugadores activos con historial para este equipo.")
+            st.warning("Los jugadores de este equipo no tienen el historial mínimo (3 partidos) para entrenar el modelo.")
         else:
             player_names = sorted(valid_players['player_display_name'].unique())
             selected_player = col_p2.selectbox("Selecciona Jugador:", player_names)
             
-            p_data = valid_players[valid_players['player_display_name'] == selected_player].copy()
-            pos = p_data['position'].iloc[0] if 'position' in p_data.columns else 'UNK'
+            p_data = valid_players[valid_players['player_display_name'] == selected_player]
+            pos = p_data['position'].iloc[0]
             
-            # MEJORA 10.3: Detección de cambio de equipo
-            equipos_hist = p_data['recent_team'].dropna().unique()
-            if len(equipos_hist) > 1 and equipos_hist[-1] != equipos_hist[-2]:
-                st.info(f"🔄 **Cambio de Equipo:** {selected_player} pasó de {equipos_hist[-2]} a {equipos_hist[-1]}. El modelo ajusta sus promedios históricos a la nueva ofensiva.")
-
             st.markdown(f"### Análisis Predictivo: {selected_player} ({pos}) vs Defensa de {opp_team}")
             
             metrics_list = []
@@ -296,10 +284,13 @@ with tabs[3]:
             labels = ["90% (Muy Seguro)", "80%", "70%", "60%", "50% (Promedio)", "40%", "30%", "20%", "10% (Arriesgado)"]
             df_props = pd.DataFrame({"Probabilidad (OVER)": labels})
             
+            # SOLUCIÓN AL KEYERROR: Extraer defensa del rival desde 'matchups' directamente (100% seguro)
             opp_h = matchups[['season', 'week', 'home_team', 'home_pts_allowed_season', 'home_pts_allowed_l3']].copy()
             opp_h.columns = ['season', 'week', 'opponent_team', 'opp_def_season', 'opp_def_l3']
+            
             opp_a = matchups[['season', 'week', 'away_team', 'away_pts_allowed_season', 'away_pts_allowed_l3']].copy()
             opp_a.columns = ['season', 'week', 'opponent_team', 'opp_def_season', 'opp_def_l3']
+            
             opp_def = pd.concat([opp_h, opp_a]).drop_duplicates(subset=['season', 'week', 'opponent_team'])
 
             for col_stat, stat_name in metrics_list:
@@ -307,15 +298,14 @@ with tabs[3]:
                 df_stat['stat'] = df_stat[col_stat]
                 df_stat = df_stat.dropna(subset=['stat'])
                 
-                # Se redujo a 2 partidos el mínimo para incluir Rookies
-                if len(df_stat) < 2:
+                if len(df_stat) < 3:
                     st.caption(f"*Historial insuficiente para calcular {stat_name}*")
                     continue
                 
-                mean_stat = df_stat['stat'].mean()
-                df_stat['roll_3'] = df_stat['stat'].shift(1).rolling(3, min_periods=1).mean().bfill().fillna(mean_stat)
-                df_stat['roll_season'] = df_stat['stat'].shift(1).rolling(17, min_periods=1).mean().bfill().fillna(mean_stat)
+                df_stat['roll_3'] = df_stat['stat'].shift(1).rolling(3, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
+                df_stat['roll_season'] = df_stat['stat'].shift(1).rolling(17, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
                 
+                # Cruzamos usando el historial defensivo extraído
                 if 'opponent_team' in df_stat.columns:
                     df_stat = df_stat.merge(opp_def, on=['season', 'week', 'opponent_team'], how='left')
                     df_stat['opp_def_season'] = df_stat['opp_def_season'].fillna(21.0)
@@ -324,58 +314,31 @@ with tabs[3]:
                     df_stat['opp_def_season'] = 21.0
                     df_stat['opp_def_l3'] = 21.0
                 
+                X_train = df_stat[['roll_3', 'roll_season', 'opp_def_season', 'opp_def_l3']].fillna(0)
+                y_train = df_stat['stat']
+                
+                ml_model = Ridge(random_state=42)
+                ml_model.fit(X_train, y_train)
+                
+                preds = ml_model.predict(X_train)
+                std_resid = np.std(y_train - preds)
+                if std_resid < 0.1 or np.isnan(std_resid): std_resid = df_stat['stat'].std() + 0.1
+                
                 curr_r3 = df_stat['stat'].rolling(3, min_periods=1).mean().iloc[-1]
                 curr_rs = df_stat['stat'].rolling(17, min_periods=1).mean().iloc[-1]
                 
-                # MEJORA 10.2 y 10.5 (Corregir líneas de cero para novatos como Drake Maye)
-                if len(df_stat) <= 4:
-                    # Muestra pequeña: Promedio ponderado para evitar que el ML genere ceros por sobreajuste
-                    pred_mu = (curr_r3 + mean_stat) / 2.0
-                    std_resid = df_stat['stat'].std()
-                    modelo_usado = "Promedio Ponderado Progresivo (Rookie/Poca Muestra)"
-                else:
-                    # Muestra sólida: Machine Learning original
-                    X_train = df_stat[['roll_3', 'roll_season', 'opp_def_season', 'opp_def_l3']].fillna(0)
-                    y_train = df_stat['stat']
-                    
-                    ml_model = Ridge(random_state=42)
-                    ml_model.fit(X_train, y_train)
-                    preds = ml_model.predict(X_train)
-                    std_resid = np.std(y_train - preds)
-                    
-                    X_curr = pd.DataFrame({
-                        'roll_3': [curr_r3], 'roll_season': [curr_rs],
-                        'opp_def_season': [curr_opp_def_season], 'opp_def_l3': [curr_opp_def_l3]
-                    }).fillna(0)
-                    
-                    pred_mu = ml_model.predict(X_curr)[0]
-                    modelo_usado = "Machine Learning (Ridge Regression)"
+                X_curr = pd.DataFrame({
+                    'roll_3': [curr_r3],
+                    'roll_season': [curr_rs],
+                    'opp_def_season': [curr_opp_def_season],
+                    'opp_def_l3': [curr_opp_def_l3]
+                }).fillna(0)
                 
-                pred_mu = max(0, pred_mu)
-                
-                # SUELO DE VARIANZA: Previene matemáticamente el error de líneas negativas o ceros
-                min_std = mean_stat * 0.35 
-                if pd.isna(std_resid) or std_resid < min_std:
-                    std_resid = max(min_std, 5.0)
+                pred_mu = max(0, ml_model.predict(X_curr)[0])
                 
                 lines = [max(0, np.round(norm.ppf(1 - p, loc=pred_mu, scale=std_resid), 1)) for p in probs]
                 df_props[f"Línea de {stat_name}"] = lines
-                
-                st.caption(f"**{stat_name}** | Base ($\mu$): {pred_mu:.1f} | Desviación Ajustada ($\sigma$): {std_resid:.1f}")
-                
-                # MEJORA 10.6: Mostrar variables utilizadas
-                with st.expander(f"📊 Ver Variables Utilizadas para {stat_name}"):
-                    st.markdown(f"""
-                    - **Modelo Activo:** {modelo_usado}
-                    - **Partidos Disponibles:** {len(df_stat)}
-                    - **Promedio Histórico:** {mean_stat:.1f}
-                    - **Promedio Reciente (L3):** {curr_r3:.1f}
-                    - **Promedio Temporada:** {curr_rs:.1f}
-                    - **Defensa Rival (Temp):** Permite {curr_opp_def_season:.1f} pts
-                    - **Defensa Rival (L3):** Permite {curr_opp_def_l3:.1f} pts
-                    """)
-                    if 0.0 in lines[:3]:
-                        st.warning("⚠️ Líneas cercanas a 0 debido a baja consistencia o volumen histórico del jugador.")
+                st.caption(f"**{stat_name}** | Proyección Base ML: {pred_mu:.1f} | Desviación Contextual: {std_resid:.1f}")
                 
             st.dataframe(df_props, use_container_width=True, hide_index=True)
 
@@ -533,3 +496,4 @@ with tabs[7]:
             })
         
         st.dataframe(pd.DataFrame(diag_data), use_container_width=True)
+        
