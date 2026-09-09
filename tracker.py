@@ -1,5 +1,6 @@
 import sqlite3
 import pandas as pd
+import os
 
 DB_FILE = "predictions.db"
 
@@ -8,9 +9,17 @@ def init_db():
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS predictions (
-            game_id TEXT PRIMARY KEY, season INTEGER, week INTEGER,
-            home_team TEXT, away_team TEXT, pred_home REAL, pred_away REAL,
-            prob_home REAL, prob_away REAL, line_used REAL, spread_used REAL,
+            game_id TEXT PRIMARY KEY,
+            season INTEGER,
+            week INTEGER,
+            home_team TEXT,
+            away_team TEXT,
+            pred_home REAL,
+            pred_away REAL,
+            prob_home REAL,
+            prob_away REAL,
+            line_used REAL,
+            spread_used REAL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
