@@ -5,27 +5,45 @@ import pandas as pd
 @st.cache_data(show_spinner=False)
 def load_historical_schedules(start_year=2015, end_year=2026):
     try:
-        years = list(range(start_year, end_year + 1))
-        df = nfl.import_schedules(years)
-        return df
-    except Exception as e:
-        st.error(f"Error cargando historial de partidos: {e}")
+        return nfl.import_schedules(list(range(start_year, end_year + 1)))
+    except Exception:
         return pd.DataFrame()
 
-# Nuevo nombre de función y TTL para forzar el reinicio de la memoria caché
-@st.cache_data(show_spinner=False, ttl=3600)
+# CACHÉ PERMANENTE: Los años pasados no cambian, se cargan una vez al iniciar la app.
+@st.cache_data(show_spinner=False)
+def _load_historical_player_stats(years_list):
+    try:
+        return nfl.import_weekly_data(years_list, downcast=True)
+    except Exception:
+        return pd.DataFrame()
+
+# CACHÉ TEMPORAL (30 min): Solo recargamos el año actual para ver resultados recientes.
+@st.cache_data(show_spinner=False, ttl=1800)
+def _load_current_player_stats(year):
+    try:
+        return nfl.import_weekly_data([year], downcast=True)
+    except Exception:
+        return pd.DataFrame()
+
 def load_all_player_stats(years_list):
-    df_list = []
-    for year in years_list:
-        try:
-            # Descarga año por año. Si 2026 no existe (404), falla silenciosamente y sigue con los años pasados.
-            df = nfl.import_weekly_data([year], downcast=True)
-            if df is not None and not df.empty:
-                df_list.append(df)
-        except Exception:
-            continue 
-            
-    if df_list:
-        return pd.concat(df_list, ignore_index=True)
+    if not years_list: return pd.DataFrame()
+    curr_year = max(years_list)
+    hist_years = [y for y in years_list if y != curr_year]
     
-    return pd.DataFrame()
+    df_hist = _load_historical_player_stats(hist_years) if hist_years else pd.DataFrame()
+    df_curr = _load_current_player_stats(curr_year)
+    
+    frames = [df for df in [df_hist, df_curr] if not df.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+# ROSTERS ACTUALES: Descargamos el roster oficial para evitar jugadores en equipos antiguos.
+@st.cache_data(show_spinner=False, ttl=86400)
+def load_current_rosters(year):
+    try:
+        df = nfl.import_rosters([year])
+        if 'player_name' in df.columns:
+            df['player_display_name'] = df['player_name']
+        # Filtramos para tener la dupla Jugador-Equipo actual
+        return df[['player_display_name', 'team', 'position', 'status']].dropna(subset=['team'])
+    except Exception:
+        return pd.DataFrame()
