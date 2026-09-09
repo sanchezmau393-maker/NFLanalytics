@@ -4,90 +4,59 @@ import numpy as np
 def build_features(schedules):
     df = schedules.copy()
     
-    # Utilizamos TODOS los juegos (jugados y futuros)
-    home = df[['game_id', 'season', 'week', 'home_team', 'home_score', 'away_score']].copy()
-    home.rename(columns={'home_team': 'team', 'home_score': 'pts_scored', 'away_score': 'pts_allowed'}, inplace=True)
+    # Asegurar que gameday sea formato fecha para calcular descansos
+    df['gameday'] = pd.to_datetime(df['gameday'])
+    
+    # Separar local y visitante
+    home = df[['game_id', 'season', 'week', 'gameday', 'home_team', 'away_team', 'home_score', 'away_score']].copy()
+    home.rename(columns={'home_team': 'team', 'away_team': 'opponent', 'home_score': 'pts_scored', 'away_score': 'pts_allowed'}, inplace=True)
     home['is_home'] = 1
     
-    away = df[['game_id', 'season', 'week', 'away_team', 'away_score', 'home_score']].copy()
-    away.rename(columns={'away_team': 'team', 'away_score': 'pts_scored', 'home_score': 'pts_allowed'}, inplace=True)
+    away = df[['game_id', 'season', 'week', 'gameday', 'away_team', 'home_team', 'away_score', 'home_score']].copy()
+    away.rename(columns={'away_team': 'team', 'home_team': 'opponent', 'away_score': 'pts_scored', 'home_score': 'pts_allowed'}, inplace=True)
     away['is_home'] = 0
     
-    team_games = pd.concat([home, away]).sort_values(['season', 'week'])
+    team_games = pd.concat([home, away]).sort_values(['team', 'season', 'week'])
     
     def apply_rolling(g):
         g = g.sort_values(['season', 'week'])
-        
-        # Identificar solo los partidos que ya tienen un resultado real
         played_idx = g['pts_scored'].notna()
+        
+        # Diferencial de puntos
+        g.loc[played_idx, 'point_diff'] = g.loc[played_idx, 'pts_scored'] - g.loc[played_idx, 'pts_allowed']
+        
+        # Días de descanso (diferencia entre el gameday actual y el anterior)
+        g['days_since_last_game'] = g['gameday'].diff().dt.days
+        # Llenar el primer partido de la temporada asumiendo descanso completo (ej. 14 días o más)
+        g['days_since_last_game'] = g['days_since_last_game'].fillna(14).clip(upper=14) 
+        
         valid_sc = g.loc[played_idx, 'pts_scored']
         valid_al = g.loc[played_idx, 'pts_allowed']
+        valid_diff = g.loc[played_idx, 'point_diff']
         
-        # Calcular promedios SOLO sobre los partidos jugados para no diluir los datos con NaNs
-        roll_17_sc = valid_sc.rolling(17, min_periods=1).mean()
-        roll_3_sc = valid_sc.rolling(3, min_periods=1).mean()
-        roll_5_sc = valid_sc.rolling(5, min_periods=1).mean()
-        
-        roll_17_al = valid_al.rolling(17, min_periods=1).mean()
-        roll_3_al = valid_al.rolling(3, min_periods=1).mean()
-        roll_5_al = valid_al.rolling(5, min_periods=1).mean()
-        
-        # Asignar los cálculos temporales respetando el índice del dataframe original
-        g['temp_17_sc'] = np.nan; g.loc[played_idx, 'temp_17_sc'] = roll_17_sc
-        g['temp_3_sc'] = np.nan;  g.loc[played_idx, 'temp_3_sc'] = roll_3_sc
-        g['temp_5_sc'] = np.nan;  g.loc[played_idx, 'temp_5_sc'] = roll_5_sc
-        
-        g['temp_17_al'] = np.nan; g.loc[played_idx, 'temp_17_al'] = roll_17_al
-        g['temp_3_al'] = np.nan;  g.loc[played_idx, 'temp_3_al'] = roll_3_al
-        g['temp_5_al'] = np.nan;  g.loc[played_idx, 'temp_5_al'] = roll_5_al
-        
-        # shift(1): Mueve los datos un partido hacia adelante (Evita Data Leakage).
-        # ffill(): Arrastra el último nivel conocido hacia los partidos futuros de 2026.
-        g['pts_scored_season'] = g['temp_17_sc'].shift(1).ffill()
-        g['pts_allowed_season'] = g['temp_17_al'].shift(1).ffill()
-        g['pts_scored_l3'] = g['temp_3_sc'].shift(1).ffill()
-        g['pts_allowed_l3'] = g['temp_3_al'].shift(1).ffill()
-        g['pts_scored_l5'] = g['temp_5_sc'].shift(1).ffill()
-        g['pts_allowed_l5'] = g['temp_5_al'].shift(1).ffill()
-        
-        # Limpiar columnas temporales
+        # Promedios móviles (3, 5, 8, 17)
+        for w in [3, 5, 8, 17]:
+            g[f'temp_{w}_sc'] = np.nan; g.loc[played_idx, f'temp_{w}_sc'] = valid_sc.rolling(w, min_periods=1).mean()
+            g[f'temp_{w}_al'] = np.nan; g.loc[played_idx, f'temp_{w}_al'] = valid_al.rolling(w, min_periods=1).mean()
+            g[f'temp_{w}_diff'] = np.nan; g.loc[played_idx, f'temp_{w}_diff'] = valid_diff.rolling(w, min_periods=1).mean()
+            
+            # Aplicar shift(1) para evitar Data Leakage
+            g[f'pts_scored_l{w}'] = g[f'temp_{w}_sc'].shift(1).ffill()
+            g[f'pts_allowed_l{w}'] = g[f'temp_{w}_al'].shift(1).ffill()
+            g[f'diff_l{w}'] = g[f'temp_{w}_diff'].shift(1).ffill()
+
+        # Limpieza de temporales
         g = g.drop(columns=[c for c in g.columns if c.startswith('temp_')])
         return g
         
     team_games = team_games.groupby('team', group_keys=False).apply(apply_rolling).reset_index(drop=True)
     
-    # Actualización del momentum
-    team_games['momentum_off'] = team_games['pts_scored_l3'] - team_games['pts_scored_season']
-    team_games['momentum_def'] = team_games['pts_allowed_season'] - team_games['pts_allowed_l3']
+    # Eficiencia y Tendencias (Momentum)
+    team_games['momentum_off_3_17'] = team_games['pts_scored_l3'] - team_games['pts_scored_l17']
+    team_games['momentum_def_3_17'] = team_games['pts_allowed_l17'] - team_games['pts_allowed_l3']
+    team_games['trend_diff'] = team_games['diff_l3'] - team_games['diff_l17']
     
-    # Fillna aplica ahora SOLO para el primer partido histórico de la franquicia en 2015
-    team_games.fillna({
-        'pts_scored_season': 21.0, 'pts_allowed_season': 21.0,
-        'pts_scored_l3': 21.0, 'pts_allowed_l3': 21.0,
-        'pts_scored_l5': 21.0, 'pts_allowed_l5': 21.0,
-        'momentum_off': 0.0, 'momentum_def': 0.0
-    }, inplace=True)
-    
+    team_games.fillna(0, inplace=True) # Manejo de NaNs iniciales
     return team_games
-
-def prepare_matchup_data(schedules, team_games):
-    df = schedules.copy()
-    team_games = team_games.reset_index(drop=True)
-    
-    cols_to_drop = ['is_home', 'pts_scored', 'pts_allowed', 'season', 'week', 'team']
-    
-    # Merge Local
-    h_feats = team_games[team_games['is_home'] == 1].copy()
-    h_feats = h_feats.drop(columns=[c for c in cols_to_drop if c in h_feats.columns])
-    h_feats.columns = [f"home_{c}" if c != 'game_id' else c for c in h_feats.columns]
-    df = df.merge(h_feats, on='game_id', how='left')
-    
-    # Merge Visitante
-    a_feats = team_games[team_games['is_home'] == 0].copy()
-    a_feats = a_feats.drop(columns=[c for c in cols_to_drop if c in a_feats.columns])
-    a_feats.columns = [f"away_{c}" if c != 'game_id' else c for c in a_feats.columns]
-    df = df.merge(a_feats, on='game_id', how='left')
-    
-    return df
 
 
