@@ -162,7 +162,6 @@ with tabs[1]:
         h_ml = float(g.get('home_moneyline', 0)) if pd.notna(g.get('home_moneyline')) else 0
         a_ml = float(g.get('away_moneyline', 0)) if pd.notna(g.get('away_moneyline')) else 0
         
-        # Convención de Spread estandarizada (Negativo = Favorito Local)
         if h_ml < 0 and a_ml > 0: auto_spread = -abs(raw_sp)
         elif a_ml < 0 and h_ml > 0: auto_spread = abs(raw_sp) 
         else: auto_spread = -raw_sp if raw_sp != 0 else 0.0
@@ -183,7 +182,7 @@ with tabs[1]:
             
             prob_over = np.mean(res['total'] > ou_line)
             prob_under = np.mean(res['total'] < ou_line)
-            prob_cover = np.mean(res['diff'] < spread_line) # Convención corregida
+            prob_cover = np.mean(res['diff'] < spread_line)
             
             st.markdown(f"**Over {ou_line}:** {prob_over*100:.1f}% | **Under {ou_line}:** {prob_under*100:.1f}%")
             st.markdown(f"**Probabilidad {g['home_team']} cubre Spread ({spread_line}):** {prob_cover*100:.1f}%")
@@ -234,19 +233,16 @@ with tabs[3]:
         col_p1, col_p2 = st.columns(2)
         selected_team = col_p1.selectbox("Selecciona Equipo al que pertenece el jugador:", [g_prop['away_team'], g_prop['home_team']])
         
-        # CONDICIONAL ESTRICTA: ¿Juega en este equipo esta temporada?
+        # CONDICIONAL ESTRICTA
         df_season = weekly_data[weekly_data['season'] == selected_season]
         
         if df_season.empty:
-            # Fallback lógico: Si es semana 1 y no hay historial de esta temporada aún, usamos el último equipo conocido.
             latest_team_map = weekly_data.sort_values(['season', 'week']).groupby('player_display_name')['recent_team'].last()
             valid_roster = latest_team_map[latest_team_map == selected_team].index.tolist()
         else:
-            # Si ya hay datos en la temporada, filtramos SÓLO a quienes hayan registrado al equipo seleccionado como su equipo actual este año.
             latest_team_this_season = df_season.sort_values('week').groupby('player_display_name')['recent_team'].last()
             valid_roster = latest_team_this_season[latest_team_this_season == selected_team].index.tolist()
 
-        # Extraer todo el historial de esos jugadores validados para alimentar el modelo
         team_players = weekly_data[weekly_data['player_display_name'].isin(valid_roster)]
         valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
         player_names = sorted(valid_players['player_display_name'].unique())
@@ -257,8 +253,6 @@ with tabs[3]:
             selected_player = col_p2.selectbox("Selecciona Jugador:", player_names)
             
             p_data = valid_players[valid_players['player_display_name'] == selected_player]
-            
-            # Obtener la posición correcta y más reciente
             pos_data = p_data['position'].dropna()
             pos = pos_data.iloc[-1] if not pos_data.empty else 'FLEX'
             
@@ -282,15 +276,12 @@ with tabs[3]:
 
             for col_stat, stat_name in metrics_list:
                 df_stat = p_data.copy().sort_values(['season', 'week'])
-                if col_stat not in df_stat.columns:
-                    continue
+                if col_stat not in df_stat.columns: continue
                 df_stat = df_stat.dropna(subset=[col_stat])
                 df_stat['stat'] = df_stat[col_stat]
                 
-                if len(df_stat) < 3:
-                    continue
+                if len(df_stat) < 3: continue
                 
-                # CORRECCIÓN DE DATA LEAKAGE: expanding().mean() en lugar de bfill()
                 df_stat['hist_mean'] = df_stat['stat'].shift(1).expanding(min_periods=1).mean().fillna(df_stat['stat'].mean())
                 df_stat['roll_3'] = df_stat['stat'].shift(1).rolling(3, min_periods=1).mean().fillna(df_stat['hist_mean'])
                 
@@ -317,7 +308,6 @@ with tabs[3]:
                 std_resid = np.std(y_train - ml_model.predict(X_train))
                 if std_resid < 0.1 or np.isnan(std_resid): std_resid = df_stat['stat'].std() + 0.1
                 
-                # CORRECCIÓN DE LÍNEA CERO (TRUNCATED NORMAL)
                 clip_a = (0 - pred_mu) / std_resid if std_resid > 0 else 0
                 lines = [max(0, np.round(truncnorm.ppf(1 - p, a=clip_a, b=np.inf, loc=pred_mu, scale=std_resid), 1)) for p in probs]
                 
@@ -394,8 +384,7 @@ with tabs[4]:
                         for g_id, t_list in g_types.items():
                             if 'ML' in t_list and 'Spread' in t_list: is_valid = False; break
                             if t_list.count('ML') > 1 or t_list.count('Spread') > 1 or t_list.count('OU') > 1: is_valid = False; break
-                            if len(t_list) > 1: # Bloqueamos predicciones del mismo partido para evitar sesgos de independencia
-                                is_valid = False; break 
+                            if len(t_list) > 1: is_valid = False; break 
                                 
                         if not is_valid: continue
                         
