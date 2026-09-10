@@ -11,6 +11,7 @@ import model
 import monte_carlo
 import tracker
 
+# Configuración inicial de la página
 st.set_page_config(page_title="NFL Analytics Pro", page_icon="🏈", layout="wide")
 
 if 'selected_game_id' not in st.session_state:
@@ -108,7 +109,7 @@ with tabs[0]:
                     select_game(row['game_id'])
                     st.success("¡Partido seleccionado! Pasa a la pestaña '🔮 Predicción' o '🏃 Player Props'.")
 
-# --- PESTAÑA 2: PREDICCIÓN (Funcionalidad original conservada) ---
+# --- PESTAÑA 2: PREDICCIÓN ---
 with tabs[1]:
     if not st.session_state.selected_game_id:
         st.info("👈 Por favor selecciona un partido desde la pestaña '📅 Cartelera'.")
@@ -116,7 +117,7 @@ with tabs[1]:
         g = matchups[matchups['game_id'] == st.session_state.selected_game_id].iloc[0]
         st.header(f"Análisis: {g['away_team']} @ {g['home_team']}")
         
-        # MÓDULO ORIGINAL DE LESIONES Y BAJAS RECUPERADO
+        # Módulo de Lesiones y Bajas
         st.subheader("🚑 Reporte Automático de Lesiones y Bajas")
         col_inj1, col_inj2 = st.columns(2)
         
@@ -140,7 +141,7 @@ with tabs[1]:
         if penal_home > 0 or penal_away > 0:
             st.warning(f"Descuento automático por bajas: -{penal_home:.1f} pts a {g['home_team']} | -{penal_away:.1f} pts a {g['away_team']}")
 
-        # AJUSTES MANUALES RECUPERADOS
+        # Ajustes Manuales
         col_m1, col_m2 = st.columns(2)
         adj_manual_h = col_m1.number_input(f"Ajuste manual extra {g['home_team']} (Pts):", value=0.0, step=0.5)
         adj_manual_a = col_m2.number_input(f"Ajuste manual extra {g['away_team']} (Pts):", value=0.0, step=0.5)
@@ -171,7 +172,7 @@ with tabs[1]:
         n_sims = col_L3.selectbox("Simulaciones:", [1000, 10000, 50000], index=1)
 
         if st.button("🚀 Ejecutar Predicción", type="primary"):
-            # AQUÍ SE USA LA NUEVA FUNCIÓN CORREGIDA
+            # Llama a monte_carlo.run_simulation (asegúrate de que sea la versión bivariada actualizada)
             res = monte_carlo.run_simulation(pred_h, pred_a, std_home, std_away, n_sims=n_sims)
             
             c1, c2, c3 = st.columns(3)
@@ -194,7 +195,7 @@ with tabs[1]:
             )
             st.success("✅ Predicción registrada en el historial.")
 
-# --- PESTAÑA 3: EFICIENCIA DE PREDICCIÓN (Sin cambios) ---
+# --- PESTAÑA 3: EFICIENCIA DE PREDICCIÓN ---
 with tabs[2]:
     st.header(f"🎯 Eficiencia de Predicción - Temporada {selected_season}")
     played_games = season_data[season_data['home_score'].notna()].copy()
@@ -221,7 +222,7 @@ with tabs[2]:
         st.subheader("Evolución de Eficacia por Semana")
         st.line_chart(valid_games.groupby('week')['is_correct'].mean() * 100)
 
-# --- PESTAÑA 4: PLAYER PROPS (Con Lógica Truncada y Cero Fugas) ---
+# --- PESTAÑA 4: PLAYER PROPS (Con Buscador Global para Traspasos) ---
 with tabs[3]:
     st.header("🏃 Player Props (Sin Fugas y Corrección de Línea Cero)")
     if not st.session_state.selected_game_id:
@@ -232,24 +233,45 @@ with tabs[3]:
         g_prop = matchups[matchups['game_id'] == st.session_state.selected_game_id].iloc[0]
         
         col_p1, col_p2 = st.columns(2)
-        selected_team = col_p1.selectbox("Selecciona Equipo:", [g_prop['away_team'], g_prop['home_team']])
+        selected_team = col_p1.selectbox("Selecciona Equipo al que pertenece el jugador:", [g_prop['away_team'], g_prop['home_team']])
         
-        # FILTRADO DE ROSTER CORREGIDO (Solo equipo actual del jugador)
+        # 1. INTENTO DE FILTRADO INTELIGENTE (Smart Roster)
         weekly_data_sorted = weekly_data.sort_values(['season', 'week'])
-        latest_team_map = weekly_data_sorted.groupby('player_display_name')['recent_team'].last()
-        active_players = latest_team_map[latest_team_map == selected_team].index.tolist()
-        team_players = weekly_data_sorted[weekly_data_sorted['player_display_name'].isin(active_players)]
         
-        valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
+        # Jugadores que ya jugaron para este equipo esta misma temporada
+        current_season_data = weekly_data[weekly_data['season'] == selected_season]
+        players_this_season = current_season_data[current_season_data['recent_team'] == selected_team]['player_display_name'].unique().tolist()
         
-        if valid_players.empty:
-            st.warning("Los jugadores de este equipo no tienen el historial mínimo (3 partidos) para entrenar.")
-        else:
+        # Jugadores cuyo último partido en la historia fue con este equipo
+        latest_team_map = weekly_data_sorted.dropna(subset=['recent_team']).groupby('player_display_name')['recent_team'].last()
+        players_last_known = latest_team_map[latest_team_map == selected_team].index.tolist()
+        
+        smart_roster = sorted(list(set(players_this_season + players_last_known)))
+        
+        # 2. OVERRIDE MANUAL (El salvavidas para traspasos recientes como Sam Darnold)
+        mostrar_todos = st.checkbox("🔍 Mostrar todos los jugadores de la liga (Activa esto si el jugador fue traspasado recientemente y no aparece)")
+        
+        if mostrar_todos:
+            # Mostrar todos los jugadores con historial válido
+            valid_players = weekly_data.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
             player_names = sorted(valid_players['player_display_name'].unique())
-            selected_player = col_p2.selectbox("Selecciona Jugador:", player_names)
+        else:
+            # Mostrar solo los detectados automáticamente
+            valid_data = weekly_data[weekly_data['player_display_name'].isin(smart_roster)]
+            valid_players = valid_data.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
+            player_names = sorted(valid_players['player_display_name'].unique())
+
+        if not player_names:
+            st.warning("No se encontraron jugadores. Activa la casilla de 'Mostrar todos los jugadores' arriba.")
+        else:
+            # Streamlit permite escribir en el selectbox para buscar rápido
+            selected_player = col_p2.selectbox("Selecciona Jugador (Puedes escribir su nombre):", player_names)
             
-            p_data = valid_players[valid_players['player_display_name'] == selected_player]
-            pos = p_data['position'].iloc[0] if 'position' in p_data.columns else 'FLEX'
+            p_data = weekly_data[weekly_data['player_display_name'] == selected_player]
+            
+            # Obtener la posición correcta y más reciente
+            pos_data = p_data['position'].dropna()
+            pos = pos_data.iloc[-1] if not pos_data.empty else 'FLEX'
             
             opp_team = g_prop['home_team'] if selected_team == g_prop['away_team'] else g_prop['away_team']
             curr_opp_def_season = g_prop.get('home_pts_allowed_season', 21.0) if selected_team == g_prop['away_team'] else g_prop.get('away_pts_allowed_season', 21.0)
@@ -270,8 +292,15 @@ with tabs[3]:
             opp_def = pd.concat([opp_h, opp_a]).drop_duplicates(subset=['season', 'week', 'opponent_team'])
 
             for col_stat, stat_name in metrics_list:
-                df_stat = p_data.copy().sort_values(['season', 'week']).dropna(subset=[col_stat])
+                # Filtrar solo partidos donde la métrica no es nula
+                df_stat = p_data.copy().sort_values(['season', 'week'])
+                if col_stat not in df_stat.columns:
+                    continue
+                df_stat = df_stat.dropna(subset=[col_stat])
                 df_stat['stat'] = df_stat[col_stat]
+                
+                if len(df_stat) < 3:
+                    continue
                 
                 # CORRECCIÓN DE DATA LEAKAGE: expanding().mean() en lugar de bfill()
                 df_stat['hist_mean'] = df_stat['stat'].shift(1).expanding(min_periods=1).mean().fillna(df_stat['stat'].mean())
@@ -309,14 +338,14 @@ with tabs[3]:
                 
             st.dataframe(df_props, use_container_width=True, hide_index=True)
 
-# --- PESTAÑA 5: COMBINADAS INTELIGENTES (Toda la lógica original restaurada y mejorada) ---
+# --- PESTAÑA 5: COMBINADAS INTELIGENTES ---
 with tabs[4]:
     st.header("🔗 Generador Inteligente de Combinadas")
     
     if week_games.empty:
         st.info("No hay partidos pendientes para analizar en esta semana.")
     else:
-        st.write("El algoritmo buscará parlays tradicionales (Multi-juego) y te advertirá sobre las simulaciones conjuntas.")
+        st.write("El algoritmo buscará parlays tradicionales y evitará asunciones falsas en selecciones del mismo partido.")
         
         c1, c2 = st.columns(2)
         riesgo = c1.selectbox("Nivel de Riesgo (Prob. de éxito de la combinada):", [
@@ -350,8 +379,8 @@ with tabs[4]:
                     
                     p_over = np.mean(res['total'] > ou_line)
                     p_under = np.mean(res['total'] < ou_line)
-                    p_cov_h = np.mean(res['diff'] < spread_line) # Corregido
-                    p_cov_a = np.mean(res['diff'] > spread_line) # Corregido
+                    p_cov_h = np.mean(res['diff'] < spread_line) 
+                    p_cov_a = np.mean(res['diff'] > spread_line) 
                     
                     gid = row['game_id']
                     m_str = f"{row['away_team']} @ {row['home_team']}"
@@ -377,8 +406,8 @@ with tabs[4]:
                         for g_id, t_list in g_types.items():
                             if 'ML' in t_list and 'Spread' in t_list: is_valid = False; break
                             if t_list.count('ML') > 1 or t_list.count('Spread') > 1 or t_list.count('OU') > 1: is_valid = False; break
-                            if len(t_list) > 1: # ES UN SGP (Mismo partido)
-                                is_valid = False; break # Lo bloqueamos en el generador básico para evitar la asunción de independencia errónea
+                            if len(t_list) > 1: # Bloqueamos predicciones del mismo partido para evitar sesgos de independencia
+                                is_valid = False; break 
                                 
                         if not is_valid: continue
                         
@@ -393,7 +422,7 @@ with tabs[4]:
                         valid_parlays.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'ev': c_ev})
 
                 if not valid_parlays:
-                    st.warning("No se encontraron combinadas sólidas. El modelo es exigente.")
+                    st.warning("No se encontraron combinadas sólidas que cumplan con los filtros matemáticos.")
                 else:
                     valid_parlays.sort(key=itemgetter('ev'), reverse=True)
                     top_parlays = valid_parlays[:8]
@@ -405,7 +434,7 @@ with tabs[4]:
                                 st.markdown(f"- **{leg['match']}**: {leg['desc']} *(Prob. Individual: {leg['prob']*100:.1f}%)*")
                             st.caption(f"Beneficio Esperado (EV): {parl['ev']:.3f}")
 
-# --- PESTAÑA 6: REGISTRO HISTÓRICO (Sin cambios) ---
+# --- PESTAÑA 6: REGISTRO HISTÓRICO ---
 with tabs[5]:
     st.header("📊 Registro Histórico")
     df_preds = tracker.load_predictions()
@@ -414,14 +443,14 @@ with tabs[5]:
     else:
         st.dataframe(df_preds, use_container_width=True)
 
-# --- PESTAÑA 7: INFO DEL MODELO (Sin cambios) ---
+# --- PESTAÑA 7: INFO DEL MODELO ---
 with tabs[6]:
     st.header("📈 Desempeño del Modelo")
     c1, c2 = st.columns(2)
-    c1.metric("MAE Local (Error promedio)", f"{metrics['mae_home']:.2f} pts")
-    c2.metric("MAE Visitante (Error promedio)", f"{metrics['mae_away']:.2f} pts")
+    c1.metric("MAE Local (Error promedio base)", f"{metrics['mae_home']:.2f} pts")
+    c2.metric("MAE Visitante (Error promedio base)", f"{metrics['mae_away']:.2f} pts")
 
-# --- PESTAÑA 8: DIAGNÓSTICO (Original recuperado y ampliado) ---
+# --- PESTAÑA 8: DIAGNÓSTICO ---
 with tabs[7]:
     st.header("🐛 Diagnóstico de Características y Predicciones Base")
     st.write(f"Monitor de variables para: Temporada {selected_season} - Semana {selected_week}")
@@ -453,13 +482,11 @@ with tabs[7]:
         
         st.dataframe(pd.DataFrame(diag_data), use_container_width=True)
         
-        # Agregamos la herramienta de verificación de Nulos y Duplicados
         st.subheader("Auditoría de Integridad")
         if st.button("Verificar Fugas y Valores Nulos"):
             nas = matchups[feat_cols].isna().sum()
             if nas.sum() > 0:
-                st.warning("⚠️ Variables con NA detectadas (Posible falla en promedios de temporada previa):")
+                st.warning("⚠️ Variables con NA detectadas:")
                 st.write(nas[nas > 0])
             else:
                 st.success("✅ Base de datos limpia. No hay fugas de NAs.")
-        
