@@ -154,7 +154,7 @@ with tabs[1]:
         pred_a = max(0, pred_a_base - penal_away + adj_manual_a)
 
         st.markdown("---")
-        st.subheader("🎲 Simulaciones Monte Carlo (Corregidas)")
+        st.subheader("🎲 Simulaciones Monte Carlo")
         col_L1, col_L2, col_L3 = st.columns(3)
         
         auto_ou = float(g['total_line']) if pd.notna(g['total_line']) else 45.5
@@ -221,9 +221,9 @@ with tabs[2]:
         st.subheader("Evolución de Eficacia por Semana")
         st.line_chart(valid_games.groupby('week')['is_correct'].mean() * 100)
 
-# --- PESTAÑA 4: PLAYER PROPS (Condicional Estricta) ---
+# --- PESTAÑA 4: PLAYER PROPS ---
 with tabs[3]:
-    st.header("🏃 Player Props (Sin Fugas y Corrección de Línea Cero)")
+    st.header("🏃 Player Props (Filtro Condicional Estricto)")
     if not st.session_state.selected_game_id:
         st.info("👈 Selecciona primero un partido desde la pestaña '📅 Cartelera'.")
     elif weekly_data.empty:
@@ -234,25 +234,28 @@ with tabs[3]:
         col_p1, col_p2 = st.columns(2)
         selected_team = col_p1.selectbox("Selecciona Equipo al que pertenece el jugador:", [g_prop['away_team'], g_prop['home_team']])
         
-        # CONDICIONAL ESTRICTA SOLICITADA: ¿Juega en este equipo esta temporada?
-        current_season_data = weekly_data[weekly_data['season'] == selected_season].sort_values(['season', 'week'])
+        # --- CONDICIONAL ESTRICTA SOLICITADA POR EL USUARIO ---
+        # Aislar SOLO los datos de la temporada seleccionada
+        df_season = weekly_data[weekly_data['season'] == selected_season]
         
-        if current_season_data.empty:
-            # Fallback lógico: Si es semana 1 y no hay historial de esta temporada aún, usamos el último equipo conocido.
-            latest_team_map = weekly_data.sort_values(['season', 'week']).groupby('player_display_name')['recent_team'].last()
-            valid_roster = latest_team_map[latest_team_map == selected_team].index.tolist()
+        if df_season.empty:
+            st.warning(f"⚠️ La temporada {selected_season} aún no tiene estadísticas de jugadores registradas en la base de datos. No se pueden filtrar los rosters actuales.")
+            valid_roster = []
         else:
-            # Si ya hay datos en la temporada, filtramos SÓLO a quienes hayan registrado al equipo seleccionado como su equipo actual este año.
-            latest_team_this_season = current_season_data.groupby('player_display_name')['recent_team'].last()
-            valid_roster = latest_team_this_season[latest_team_this_season == selected_team].index.tolist()
-        
-        # Filtramos el historial completo de esos jugadores validados
+            # Agrupar por jugador y tomar su ÚLTIMO equipo registrado EN ESTA TEMPORADA
+            last_team_this_season = df_season.sort_values('week').groupby('player_display_name')['recent_team'].last()
+            
+            # Jugador juega en este equipo esta temporada -> SÍ -> Lo incluyo. NO -> No lo incluyo.
+            valid_roster = last_team_this_season[last_team_this_season == selected_team].index.tolist()
+        # -----------------------------------------------------
+
+        # Extraer todo el historial de esos jugadores validados para alimentar el modelo
         team_players = weekly_data[weekly_data['player_display_name'].isin(valid_roster)]
         valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
         player_names = sorted(valid_players['player_display_name'].unique())
 
         if not player_names:
-            st.warning(f"No hay jugadores registrados en {selected_team} para la temporada {selected_season} con historial suficiente.")
+            st.info(f"Ningún jugador cumple con los requisitos de historial para {selected_team} en esta temporada.")
         else:
             selected_player = col_p2.selectbox("Selecciona Jugador:", player_names)
             
@@ -281,6 +284,7 @@ with tabs[3]:
             opp_def = pd.concat([opp_h, opp_a]).drop_duplicates(subset=['season', 'week', 'opponent_team'])
 
             for col_stat, stat_name in metrics_list:
+                # Filtrar solo partidos donde la métrica no es nula
                 df_stat = p_data.copy().sort_values(['season', 'week'])
                 if col_stat not in df_stat.columns:
                     continue
