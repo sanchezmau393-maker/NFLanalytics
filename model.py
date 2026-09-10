@@ -67,7 +67,6 @@ def train_models(matchups):
     y_away = played_games['away_score']
     
     # 3. SUITE DE MODELOS A EVALUAR
-    # Se aplican hiperparámetros conservadores para evitar sobreajuste en muestras pequeñas
     models_to_evaluate = {
         'Ridge': Ridge(alpha=5.0, random_state=42),
         'Lasso': Lasso(alpha=0.5, random_state=42),
@@ -90,9 +89,6 @@ def train_models(matchups):
     best_model_away.fit(X, y_away)
     
     # 6. CÁLCULO REALISTA DE DESVIACIÓN ESTÁNDAR PARA MONTE CARLO
-    # Utilizar la varianza del set de entrenamiento crea overconfidence (campanas muy estrechas).
-    # Aproximamos la desviación estándar basándonos matemáticamente en el Error Absoluto Medio FUERA DE MUESTRA.
-    # En una distribución normal: MAE = std * sqrt(2/pi) -> std = MAE * 1.253
     std_home = max(3.0, best_mae_h * 1.253)
     std_away = max(3.0, best_mae_a * 1.253)
     
