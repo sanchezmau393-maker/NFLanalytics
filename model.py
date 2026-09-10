@@ -1,46 +1,108 @@
-import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+import numpy as np
+from sklearn.linear_model import Ridge, Lasso, ElasticNet
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error
+import warnings
 
-def train_models(matchup_df):
-    # Entrenamos solo con partidos que ya tienen resultado
-    train_df = matchup_df.dropna(subset=['home_score', 'away_score']).copy()
+# Suprimir advertencias de convergencia para modelos lineales en validación rápida
+warnings.filterwarnings('ignore')
+
+try:
+    from xgboost import XGBRegressor
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
+
+def select_best_model_temporal(X, y, models, n_splits=5):
+    """
+    Evalúa un diccionario de modelos utilizando validación cruzada temporal.
+    Garantiza que ninguna predicción utilice datos del futuro.
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    best_model_name = None
+    best_mae = float('inf')
+    model_results = {}
+
+    for name, model in models.items():
+        maes = []
+        for train_index, test_index in tscv.split(X):
+            X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+            y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+            
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+            maes.append(mean_absolute_error(y_test, preds))
+        
+        avg_mae = np.mean(maes)
+        model_results[name] = avg_mae
+        
+        if avg_mae < best_mae:
+            best_mae = avg_mae
+            best_model_name = name
+            
+    return best_model_name, best_mae, model_results
+
+def train_models(matchups):
+    """
+    Ordena cronológicamente los datos, evalúa los modelos secuencialmente, 
+    selecciona el mejor basado en MAE fuera de muestra y entrena los modelos finales.
+    """
+    # 1. ORDEN TEMPORAL ESTRICTO (El núcleo para evitar data leakage)
+    played_games = matchups.dropna(subset=['home_score', 'away_score']).copy()
+    played_games = played_games.sort_values(['season', 'week']).reset_index(drop=True)
     
-    features = [
-        'home_pts_scored_season', 'home_pts_allowed_season',
-        'home_pts_scored_l3', 'home_pts_allowed_l3',
-        'home_momentum_off', 'home_momentum_def',
-        'away_pts_scored_season', 'away_pts_allowed_season',
-        'away_pts_scored_l3', 'away_pts_allowed_l3',
-        'away_momentum_off', 'away_momentum_def'
+    # 2. SEPARACIÓN DE VARIABLES
+    exclude_cols = [
+        'game_id', 'season', 'week', 'date', 'home_team', 'away_team', 
+        'home_score', 'away_score', 'total_line', 'spread_line', 
+        'home_moneyline', 'away_moneyline'
     ]
     
-    X = train_df[features].fillna(0)
-    y_home = train_df['home_score']
-    y_away = train_df['away_score']
+    feat_cols = [c for c in played_games.columns if c not in exclude_cols and pd.api.types.is_numeric_dtype(played_games[c])]
     
-    # HistGradientBoosting es robusto, soporta NaNs nativamente y es una alternativa ideal a XGBoost
-    model_home = HistGradientBoostingRegressor(random_state=42, max_iter=150, min_samples_leaf=10)
-    model_home.fit(X, y_home)
+    X = played_games[feat_cols].fillna(0)
+    y_home = played_games['home_score']
+    y_away = played_games['away_score']
     
-    model_away = HistGradientBoostingRegressor(random_state=42, max_iter=150, min_samples_leaf=10)
-    model_away.fit(X, y_away)
-    
-    # Obtenemos predicciones sobre todo el dataset para calcular residuos
-    preds_home = model_home.predict(X)
-    preds_away = model_away.predict(X)
-    
-    # Calculamos la desviación estándar de los residuos para las simulaciones de Monte Carlo
-    std_home = np.std(y_home - preds_home)
-    std_away = np.std(y_away - preds_away)
-    
-    # Métricas para validación
-    metrics = {
-        'mae_home': mean_absolute_error(y_home, preds_home),
-        'mae_away': mean_absolute_error(y_away, preds_away),
-        'rmse_home': np.sqrt(mean_squared_error(y_home, preds_home)),
-        'rmse_away': np.sqrt(mean_squared_error(y_away, preds_away))
+    # 3. SUITE DE MODELOS A EVALUAR
+    # Se aplican hiperparámetros conservadores para evitar sobreajuste en muestras pequeñas
+    models_to_evaluate = {
+        'Ridge': Ridge(alpha=5.0, random_state=42),
+        'Lasso': Lasso(alpha=0.5, random_state=42),
+        'ElasticNet': ElasticNet(alpha=0.5, l1_ratio=0.5, random_state=42),
+        'RandomForest': RandomForestRegressor(n_estimators=100, max_depth=5, min_samples_leaf=5, random_state=42),
+        'GradientBoosting': GradientBoostingRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
     }
     
-    return model_home, model_away, features, std_home, std_away, metrics
+    if HAS_XGB:
+        models_to_evaluate['XGBoost'] = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
+        
+    # 4. SELECCIÓN OUT-OF-SAMPLE PARA EQUIPO LOCAL
+    best_name_h, best_mae_h, results_h = select_best_model_temporal(X, y_home, models_to_evaluate)
+    best_model_home = models_to_evaluate[best_name_h]
+    best_model_home.fit(X, y_home)
+    
+    # 5. SELECCIÓN OUT-OF-SAMPLE PARA EQUIPO VISITANTE
+    best_name_a, best_mae_a, results_a = select_best_model_temporal(X, y_away, models_to_evaluate)
+    best_model_away = models_to_evaluate[best_name_a]
+    best_model_away.fit(X, y_away)
+    
+    # 6. CÁLCULO REALISTA DE DESVIACIÓN ESTÁNDAR PARA MONTE CARLO
+    # Utilizar la varianza del set de entrenamiento crea overconfidence (campanas muy estrechas).
+    # Aproximamos la desviación estándar basándonos matemáticamente en el Error Absoluto Medio FUERA DE MUESTRA.
+    # En una distribución normal: MAE = std * sqrt(2/pi) -> std = MAE * 1.253
+    std_home = max(3.0, best_mae_h * 1.253)
+    std_away = max(3.0, best_mae_a * 1.253)
+    
+    metrics = {
+        'best_model_home': best_name_h,
+        'mae_home': best_mae_h,
+        'best_model_away': best_name_a,
+        'mae_away': best_mae_a,
+        'results_home': results_h,
+        'results_away': results_a
+    }
+    
+    return best_model_home, best_model_away, feat_cols, std_home, std_away, metrics
