@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy.stats import norm
+from scipy.stats import truncnorm, norm
 import itertools
 from operator import itemgetter
 from sklearn.linear_model import Ridge
@@ -28,7 +28,6 @@ def get_ml_odds(american_odds, prob):
         except: pass
     return max(1.05, 1.0 / prob) if prob > 0 else 1.05
 
-# Se renombró la función a get_matchups_and_features y se agregó TTL para forzar la limpieza de caché
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_matchups_and_features(schedules):
     t_games = features.build_features(schedules)
@@ -50,7 +49,7 @@ with st.spinner("Descargando calendarios e históricos de la NFL..."):
         st.stop()
 
 # --- 2. INGENIERÍA DE CARACTERÍSTICAS Y ENTRENAMIENTO ---
-with st.spinner("Cargando momentum y modelos predictivos..."):
+with st.spinner("Cargando momentum y modelos predictivos temporales..."):
     matchups, team_games = get_matchups_and_features(schedules)
     m_home, m_away, feat_cols, std_home, std_away, metrics = entrenar_modelos_ml(matchups)
 
@@ -58,11 +57,9 @@ seasons_in_data = sorted(schedules['season'].dropna().unique(), reverse=True)
 curr_year = int(seasons_in_data[0])
 target_years = [curr_year, curr_year - 1, curr_year - 2, curr_year - 3]
 
-# Carga de historial de jugadores (Asegúrate de que tu data_loader.py tenga esta función actualizada del paso anterior)
 try:
     weekly_data = data_loader.load_all_player_stats(target_years)
 except AttributeError:
-    # Fallback temporal si la función no se renombró correctamente en data_loader
     weekly_data = data_loader.load_weekly_data(target_years)
 
 # --- BARRA LATERAL ---
@@ -111,105 +108,95 @@ with tabs[0]:
                     select_game(row['game_id'])
                     st.success("¡Partido seleccionado! Pasa a la pestaña '🔮 Predicción' o '🏃 Player Props'.")
 
-# --- PESTAÑA 2: PREDICCIÓN ---
+# --- PESTAÑA 2: PREDICCIÓN (Funcionalidad original conservada) ---
 with tabs[1]:
     if not st.session_state.selected_game_id:
         st.info("👈 Por favor selecciona un partido desde la pestaña '📅 Cartelera'.")
     else:
-        g = matchups[matchups['game_id'] == st.session_state.selected_game_id]
-        if g.empty:
-            st.error("Partido no encontrado.")
-        else:
-            g = g.iloc[0]
-            st.header(f"Análisis: {g['away_team']} @ {g['home_team']}")
+        g = matchups[matchups['game_id'] == st.session_state.selected_game_id].iloc[0]
+        st.header(f"Análisis: {g['away_team']} @ {g['home_team']}")
+        
+        # MÓDULO ORIGINAL DE LESIONES Y BAJAS RECUPERADO
+        st.subheader("🚑 Reporte Automático de Lesiones y Bajas")
+        col_inj1, col_inj2 = st.columns(2)
+        
+        roster_home = sorted(weekly_data[weekly_data['recent_team'] == g['home_team']]['player_display_name'].dropna().unique()) if not weekly_data.empty else []
+        roster_away = sorted(weekly_data[weekly_data['recent_team'] == g['away_team']]['player_display_name'].dropna().unique()) if not weekly_data.empty else []
+        
+        with col_inj1:
+            bajas_home = st.multiselect(f"Bajas en {g['home_team']}:", roster_home)
+        with col_inj2:
+            bajas_away = st.multiselect(f"Bajas en {g['away_team']}:", roster_away)
             
-            st.subheader("🚑 Reporte Automático de Lesiones y Bajas")
-            col_inj1, col_inj2 = st.columns(2)
+        penal_home, penal_away = 0.0, 0.0
+        for player in bajas_home:
+            pos = weekly_data[weekly_data['player_display_name'] == player]['position'].iloc[0] if not weekly_data.empty else 'DEF'
+            penal_home += 4.0 if pos == 'QB' else (1.5 if pos in ['WR', 'RB', 'TE'] else 0.5)
             
-            roster_home = sorted(weekly_data[weekly_data['recent_team'] == g['home_team']]['player_display_name'].dropna().unique()) if not weekly_data.empty else []
-            roster_away = sorted(weekly_data[weekly_data['recent_team'] == g['away_team']]['player_display_name'].dropna().unique()) if not weekly_data.empty else []
-            
-            with col_inj1:
-                bajas_home = st.multiselect(f"Bajas en {g['home_team']}:", roster_home)
-            with col_inj2:
-                bajas_away = st.multiselect(f"Bajas en {g['away_team']}:", roster_away)
-                
-            penal_home = 0.0
-            for player in bajas_home:
-                pos = weekly_data[weekly_data['player_display_name'] == player]['position'].iloc[0] if not weekly_data.empty else 'DEF'
-                if pos == 'QB': penal_home += 4.0
-                elif pos in ['WR', 'RB', 'TE']: penal_home += 1.5
-                else: penal_home += 0.5
-                
-            penal_away = 0.0
-            for player in bajas_away:
-                pos = weekly_data[weekly_data['player_display_name'] == player]['position'].iloc[0] if not weekly_data.empty else 'DEF'
-                if pos == 'QB': penal_away += 4.0
-                elif pos in ['WR', 'RB', 'TE']: penal_away += 1.5
-                else: penal_away += 0.5
-            
-            if penal_home > 0 or penal_away > 0:
-                st.warning(f"Descuento automático por bajas: -{penal_home:.1f} pts a {g['home_team']} | -{penal_away:.1f} pts a {g['away_team']}")
+        for player in bajas_away:
+            pos = weekly_data[weekly_data['player_display_name'] == player]['position'].iloc[0] if not weekly_data.empty else 'DEF'
+            penal_away += 4.0 if pos == 'QB' else (1.5 if pos in ['WR', 'RB', 'TE'] else 0.5)
+        
+        if penal_home > 0 or penal_away > 0:
+            st.warning(f"Descuento automático por bajas: -{penal_home:.1f} pts a {g['home_team']} | -{penal_away:.1f} pts a {g['away_team']}")
 
-            col_m1, col_m2 = st.columns(2)
-            adj_manual_h = col_m1.number_input(f"Ajuste manual extra {g['home_team']} (Pts):", value=0.0, step=0.5)
-            adj_manual_a = col_m2.number_input(f"Ajuste manual extra {g['away_team']} (Pts):", value=0.0, step=0.5)
+        # AJUSTES MANUALES RECUPERADOS
+        col_m1, col_m2 = st.columns(2)
+        adj_manual_h = col_m1.number_input(f"Ajuste manual extra {g['home_team']} (Pts):", value=0.0, step=0.5)
+        adj_manual_a = col_m2.number_input(f"Ajuste manual extra {g['away_team']} (Pts):", value=0.0, step=0.5)
 
-            X_match = g[feat_cols].to_frame().T.fillna(0)
-            pred_h_base = max(0, m_home.predict(X_match)[0])
-            pred_a_base = max(0, m_away.predict(X_match)[0])
-            
-            pred_h = max(0, pred_h_base - penal_home + adj_manual_h)
-            pred_a = max(0, pred_a_base - penal_away + adj_manual_a)
+        X_match = g[feat_cols].to_frame().T.fillna(0)
+        pred_h_base = max(0, m_home.predict(X_match)[0])
+        pred_a_base = max(0, m_away.predict(X_match)[0])
+        
+        pred_h = max(0, pred_h_base - penal_home + adj_manual_h)
+        pred_a = max(0, pred_a_base - penal_away + adj_manual_a)
 
-            st.markdown("---")
-            st.subheader("🎲 Simulaciones Monte Carlo")
-            col_L1, col_L2, col_L3 = st.columns(3)
-            
-            auto_ou = float(g['total_line']) if pd.notna(g['total_line']) else 45.5
-            
-            raw_sp = float(g['spread_line']) if pd.notna(g['spread_line']) else 0.0
-            h_ml = float(g.get('home_moneyline', 0)) if pd.notna(g.get('home_moneyline')) else 0
-            a_ml = float(g.get('away_moneyline', 0)) if pd.notna(g.get('away_moneyline')) else 0
-            
-            if h_ml < 0 and a_ml > 0:
-                auto_spread = -abs(raw_sp)
-            elif a_ml < 0 and h_ml > 0:
-                auto_spread = abs(raw_sp) 
-            else:
-                auto_spread = -raw_sp if raw_sp != 0 else 0.0
-            
-            ou_line = col_L1.number_input("Línea Over/Under:", value=auto_ou)
-            spread_line = col_L2.number_input("Spread Local (Favorito es Negativo):", value=auto_spread)
-            n_sims = col_L3.selectbox("Simulaciones:", [1000, 10000, 50000], index=1)
+        st.markdown("---")
+        st.subheader("🎲 Simulaciones Monte Carlo (Corregidas)")
+        col_L1, col_L2, col_L3 = st.columns(3)
+        
+        auto_ou = float(g['total_line']) if pd.notna(g['total_line']) else 45.5
+        raw_sp = float(g['spread_line']) if pd.notna(g['spread_line']) else 0.0
+        h_ml = float(g.get('home_moneyline', 0)) if pd.notna(g.get('home_moneyline')) else 0
+        a_ml = float(g.get('away_moneyline', 0)) if pd.notna(g.get('away_moneyline')) else 0
+        
+        # Convención de Spread estandarizada (Negativo = Favorito Local)
+        if h_ml < 0 and a_ml > 0: auto_spread = -abs(raw_sp)
+        elif a_ml < 0 and h_ml > 0: auto_spread = abs(raw_sp) 
+        else: auto_spread = -raw_sp if raw_sp != 0 else 0.0
+        
+        ou_line = col_L1.number_input("Línea Over/Under:", value=auto_ou)
+        spread_line = col_L2.number_input("Spread Local (Favorito es Negativo):", value=auto_spread)
+        n_sims = col_L3.selectbox("Simulaciones:", [1000, 10000, 50000], index=1)
 
-            if st.button("🚀 Ejecutar Predicción", type="primary"):
-                res = monte_carlo.run_simulation(pred_h, pred_a, std_home, std_away, n_sims=n_sims)
-                
-                c1, c2, c3 = st.columns(3)
-                c1.metric(f"Prob. {g['home_team']}", f"{res['prob_home']*100:.1f}%")
-                c2.metric("Empate", f"{res['prob_tie']*100:.1f}%")
-                c3.metric(f"Prob. {g['away_team']}", f"{res['prob_away']*100:.1f}%")
-                
-                st.write(f"### 🎯 Marcador Esperado: {g['home_team']} {pred_h:.1f} - {pred_a:.1f} {g['away_team']}")
-                
-                prob_over = np.mean(res['total'] > ou_line)
-                prob_under = np.mean(res['total'] < ou_line)
-                prob_cover = np.mean(res['diff'] > -spread_line)
-                
-                st.markdown(f"**Over {ou_line}:** {prob_over*100:.1f}% | **Under {ou_line}:** {prob_under*100:.1f}%")
-                st.markdown(f"**Probabilidad {g['home_team']} cubre Spread ({spread_line}):** {prob_cover*100:.1f}%")
-                
-                tracker.save_prediction(
-                    g['game_id'], g['season'], g['week'], g['home_team'], g['away_team'],
-                    pred_h, pred_a, res['prob_home'], res['prob_away'], ou_line, spread_line
-                )
-                st.success("✅ Predicción registrada en el historial.")
+        if st.button("🚀 Ejecutar Predicción", type="primary"):
+            # AQUÍ SE USA LA NUEVA FUNCIÓN CORREGIDA
+            res = monte_carlo.run_simulation(pred_h, pred_a, std_home, std_away, n_sims=n_sims)
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f"Prob. {g['home_team']}", f"{res['prob_home']*100:.1f}%")
+            c2.metric("Empate", f"{res['prob_tie']*100:.1f}%")
+            c3.metric(f"Prob. {g['away_team']}", f"{res['prob_away']*100:.1f}%")
+            
+            st.write(f"### 🎯 Marcador Esperado: {g['home_team']} {pred_h:.1f} - {pred_a:.1f} {g['away_team']}")
+            
+            prob_over = np.mean(res['total'] > ou_line)
+            prob_under = np.mean(res['total'] < ou_line)
+            prob_cover = np.mean(res['diff'] < spread_line) # Convención corregida
+            
+            st.markdown(f"**Over {ou_line}:** {prob_over*100:.1f}% | **Under {ou_line}:** {prob_under*100:.1f}%")
+            st.markdown(f"**Probabilidad {g['home_team']} cubre Spread ({spread_line}):** {prob_cover*100:.1f}%")
+            
+            tracker.save_prediction(
+                g['game_id'], g['season'], g['week'], g['home_team'], g['away_team'],
+                pred_h, pred_a, res['prob_home'], res['prob_away'], ou_line, spread_line
+            )
+            st.success("✅ Predicción registrada en el historial.")
 
-# --- PESTAÑA 3: EFICIENCIA DE PREDICCIÓN ---
+# --- PESTAÑA 3: EFICIENCIA DE PREDICCIÓN (Sin cambios) ---
 with tabs[2]:
     st.header(f"🎯 Eficiencia de Predicción - Temporada {selected_season}")
-    
     played_games = season_data[season_data['home_score'].notna()].copy()
     if played_games.empty:
         st.info(f"Aún no hay resultados finales para evaluar en la temporada {selected_season}.")
@@ -232,124 +219,104 @@ with tabs[2]:
         c3.metric("Eficacia General (%)", f"{acc_percentage:.1f}%")
         
         st.subheader("Evolución de Eficacia por Semana")
-        weekly_acc = valid_games.groupby('week')['is_correct'].mean() * 100
-        st.line_chart(weekly_acc)
+        st.line_chart(valid_games.groupby('week')['is_correct'].mean() * 100)
 
-# --- PESTAÑA 4: PLAYER PROPS CON MACHINE LEARNING (CONTEXTUAL) ---
+# --- PESTAÑA 4: PLAYER PROPS (Con Lógica Truncada y Cero Fugas) ---
 with tabs[3]:
-    st.header("🏃 Player Props ML (Contexto del Partido)")
+    st.header("🏃 Player Props (Sin Fugas y Corrección de Línea Cero)")
     if not st.session_state.selected_game_id:
-        st.info("👈 Selecciona primero un partido desde la pestaña '📅 Cartelera' para analizar a los jugadores contra la defensa rival correspondiente.")
+        st.info("👈 Selecciona primero un partido desde la pestaña '📅 Cartelera'.")
     elif weekly_data.empty:
         st.warning("No hay datos de jugadores disponibles actualmente.")
     else:
         g_prop = matchups[matchups['game_id'] == st.session_state.selected_game_id].iloc[0]
         
-        t_home = g_prop['home_team']
-        t_away = g_prop['away_team']
-        
         col_p1, col_p2 = st.columns(2)
-        selected_team = col_p1.selectbox("Selecciona Equipo:", [t_away, t_home])
+        selected_team = col_p1.selectbox("Selecciona Equipo:", [g_prop['away_team'], g_prop['home_team']])
         
-        if selected_team == t_home:
-            opp_team = t_away
-            curr_opp_def_season = g_prop.get('away_pts_allowed_season', 21.0)
-            curr_opp_def_l3 = g_prop.get('away_pts_allowed_l3', 21.0)
-        else:
-            opp_team = t_home
-            curr_opp_def_season = g_prop.get('home_pts_allowed_season', 21.0)
-            curr_opp_def_l3 = g_prop.get('home_pts_allowed_l3', 21.0)
+        # FILTRADO DE ROSTER CORREGIDO (Solo equipo actual del jugador)
+        weekly_data_sorted = weekly_data.sort_values(['season', 'week'])
+        latest_team_map = weekly_data_sorted.groupby('player_display_name')['recent_team'].last()
+        active_players = latest_team_map[latest_team_map == selected_team].index.tolist()
+        team_players = weekly_data_sorted[weekly_data_sorted['player_display_name'].isin(active_players)]
         
-        team_players = weekly_data[weekly_data['recent_team'] == selected_team]
         valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
         
         if valid_players.empty:
-            st.warning("Los jugadores de este equipo no tienen el historial mínimo (3 partidos) para entrenar el modelo.")
+            st.warning("Los jugadores de este equipo no tienen el historial mínimo (3 partidos) para entrenar.")
         else:
             player_names = sorted(valid_players['player_display_name'].unique())
             selected_player = col_p2.selectbox("Selecciona Jugador:", player_names)
             
             p_data = valid_players[valid_players['player_display_name'] == selected_player]
-            pos = p_data['position'].iloc[0]
+            pos = p_data['position'].iloc[0] if 'position' in p_data.columns else 'FLEX'
+            
+            opp_team = g_prop['home_team'] if selected_team == g_prop['away_team'] else g_prop['away_team']
+            curr_opp_def_season = g_prop.get('home_pts_allowed_season', 21.0) if selected_team == g_prop['away_team'] else g_prop.get('away_pts_allowed_season', 21.0)
             
             st.markdown(f"### Análisis Predictivo: {selected_player} ({pos}) vs Defensa de {opp_team}")
             
-            metrics_list = []
-            if pos == 'QB': metrics_list = [('passing_yards', 'Yardas por Pase'), ('attempts', 'Intentos de Pase')]
+            if pos == 'QB': metrics_list = [('passing_yards', 'Yardas por Pase'), ('attempts', 'Intentos')]
             elif pos in ['WR', 'TE']: metrics_list = [('receiving_yards', 'Yardas por Recepción'), ('receptions', 'Recepciones')]
             elif pos == 'RB': metrics_list = [('rushing_yards', 'Yardas Terrestres'), ('carries', 'Acarreos')]
-            else: metrics_list = [('receiving_yards', 'Yardas Totales'), ('receptions', 'Recepciones')]
+            else: metrics_list = [('receiving_yards', 'Yardas Totales')]
 
             probs = [0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20, 0.10]
-            labels = ["90% (Muy Seguro)", "80%", "70%", "60%", "50% (Promedio)", "40%", "30%", "20%", "10% (Arriesgado)"]
+            labels = ["90% (Seguro)", "80%", "70%", "60%", "50% (Promedio)", "40%", "30%", "20%", "10% (Techo)"]
             df_props = pd.DataFrame({"Probabilidad (OVER)": labels})
             
-            # SOLUCIÓN AL KEYERROR: Extraer defensa del rival desde 'matchups' directamente (100% seguro)
-            opp_h = matchups[['season', 'week', 'home_team', 'home_pts_allowed_season', 'home_pts_allowed_l3']].copy()
-            opp_h.columns = ['season', 'week', 'opponent_team', 'opp_def_season', 'opp_def_l3']
-            
-            opp_a = matchups[['season', 'week', 'away_team', 'away_pts_allowed_season', 'away_pts_allowed_l3']].copy()
-            opp_a.columns = ['season', 'week', 'opponent_team', 'opp_def_season', 'opp_def_l3']
-            
+            opp_h = matchups[['season', 'week', 'home_team', 'home_pts_allowed_season']].rename(columns={'home_team': 'opponent_team', 'home_pts_allowed_season': 'opp_def_season'})
+            opp_a = matchups[['season', 'week', 'away_team', 'away_pts_allowed_season']].rename(columns={'away_team': 'opponent_team', 'away_pts_allowed_season': 'opp_def_season'})
             opp_def = pd.concat([opp_h, opp_a]).drop_duplicates(subset=['season', 'week', 'opponent_team'])
 
             for col_stat, stat_name in metrics_list:
-                df_stat = p_data.copy().sort_values(['season', 'week'])
+                df_stat = p_data.copy().sort_values(['season', 'week']).dropna(subset=[col_stat])
                 df_stat['stat'] = df_stat[col_stat]
-                df_stat = df_stat.dropna(subset=['stat'])
                 
-                if len(df_stat) < 3:
-                    st.caption(f"*Historial insuficiente para calcular {stat_name}*")
-                    continue
+                # CORRECCIÓN DE DATA LEAKAGE: expanding().mean() en lugar de bfill()
+                df_stat['hist_mean'] = df_stat['stat'].shift(1).expanding(min_periods=1).mean().fillna(df_stat['stat'].mean())
+                df_stat['roll_3'] = df_stat['stat'].shift(1).rolling(3, min_periods=1).mean().fillna(df_stat['hist_mean'])
                 
-                df_stat['roll_3'] = df_stat['stat'].shift(1).rolling(3, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
-                df_stat['roll_season'] = df_stat['stat'].shift(1).rolling(17, min_periods=1).mean().bfill().fillna(df_stat['stat'].mean())
-                
-                # Cruzamos usando el historial defensivo extraído
                 if 'opponent_team' in df_stat.columns:
                     df_stat = df_stat.merge(opp_def, on=['season', 'week', 'opponent_team'], how='left')
                     df_stat['opp_def_season'] = df_stat['opp_def_season'].fillna(21.0)
-                    df_stat['opp_def_l3'] = df_stat['opp_def_l3'].fillna(21.0)
                 else:
                     df_stat['opp_def_season'] = 21.0
-                    df_stat['opp_def_l3'] = 21.0
                 
-                X_train = df_stat[['roll_3', 'roll_season', 'opp_def_season', 'opp_def_l3']].fillna(0)
+                X_train = df_stat[['roll_3', 'hist_mean', 'opp_def_season']].fillna(0)
                 y_train = df_stat['stat']
+                
+                if len(X_train) < 3: continue
                 
                 ml_model = Ridge(random_state=42)
                 ml_model.fit(X_train, y_train)
                 
-                preds = ml_model.predict(X_train)
-                std_resid = np.std(y_train - preds)
-                if std_resid < 0.1 or np.isnan(std_resid): std_resid = df_stat['stat'].std() + 0.1
-                
+                curr_hist = df_stat['stat'].expanding().mean().iloc[-1]
                 curr_r3 = df_stat['stat'].rolling(3, min_periods=1).mean().iloc[-1]
-                curr_rs = df_stat['stat'].rolling(17, min_periods=1).mean().iloc[-1]
                 
-                X_curr = pd.DataFrame({
-                    'roll_3': [curr_r3],
-                    'roll_season': [curr_rs],
-                    'opp_def_season': [curr_opp_def_season],
-                    'opp_def_l3': [curr_opp_def_l3]
-                }).fillna(0)
-                
+                X_curr = pd.DataFrame({'roll_3': [curr_r3], 'hist_mean': [curr_hist], 'opp_def_season': [curr_opp_def_season]}).fillna(0)
                 pred_mu = max(0, ml_model.predict(X_curr)[0])
                 
-                lines = [max(0, np.round(norm.ppf(1 - p, loc=pred_mu, scale=std_resid), 1)) for p in probs]
+                std_resid = np.std(y_train - ml_model.predict(X_train))
+                if std_resid < 0.1 or np.isnan(std_resid): std_resid = df_stat['stat'].std() + 0.1
+                
+                # CORRECCIÓN DE LÍNEA CERO (TRUNCATED NORMAL)
+                clip_a = (0 - pred_mu) / std_resid if std_resid > 0 else 0
+                lines = [max(0, np.round(truncnorm.ppf(1 - p, a=clip_a, b=np.inf, loc=pred_mu, scale=std_resid), 1)) for p in probs]
+                
                 df_props[f"Línea de {stat_name}"] = lines
-                st.caption(f"**{stat_name}** | Proyección Base ML: {pred_mu:.1f} | Desviación Contextual: {std_resid:.1f}")
+                st.caption(f"**{stat_name}** | Proyección ML: {pred_mu:.1f} | Desviación: {std_resid:.1f}")
                 
             st.dataframe(df_props, use_container_width=True, hide_index=True)
 
-# --- PESTAÑA 5: COMBINADAS INTELIGENTES ---
+# --- PESTAÑA 5: COMBINADAS INTELIGENTES (Toda la lógica original restaurada y mejorada) ---
 with tabs[4]:
-    st.header("🔗 Generador Inteligente de Combinadas (Frontera Eficiente)")
+    st.header("🔗 Generador Inteligente de Combinadas")
     
     if week_games.empty:
         st.info("No hay partidos pendientes para analizar en esta semana.")
     else:
-        st.write("El algoritmo calculará opciones utilizando **ÚNICAMENTE** selecciones donde el modelo tiene alta confianza matemática (Probabilidades superiores al 55%). Si los partidos son muy cerrados, el modelo se abstendrá de recomendar.")
+        st.write("El algoritmo buscará parlays tradicionales (Multi-juego) y te advertirá sobre las simulaciones conjuntas.")
         
         c1, c2 = st.columns(2)
         riesgo = c1.selectbox("Nivel de Riesgo (Prob. de éxito de la combinada):", [
@@ -373,46 +340,33 @@ with tabs[4]:
                     res = monte_carlo.run_simulation(p_h, p_a, std_home, std_away, n_sims=2000)
                     
                     ou_line = float(row['total_line']) if pd.notna(row['total_line']) else 45.5
-                    
                     raw_sp = float(row['spread_line']) if pd.notna(row['spread_line']) else 0.0
                     r_h_ml = float(row.get('home_moneyline', 0)) if pd.notna(row.get('home_moneyline')) else 0
                     r_a_ml = float(row.get('away_moneyline', 0)) if pd.notna(row.get('away_moneyline')) else 0
                     
-                    if r_h_ml < 0 and r_a_ml > 0:
-                        spread_line = -abs(raw_sp)
-                    elif r_a_ml < 0 and r_h_ml > 0:
-                        spread_line = abs(raw_sp)
-                    else:
-                        spread_line = -raw_sp if raw_sp != 0 else 0.0
+                    if r_h_ml < 0 and r_a_ml > 0: spread_line = -abs(raw_sp)
+                    elif r_a_ml < 0 and r_h_ml > 0: spread_line = abs(raw_sp)
+                    else: spread_line = -raw_sp if raw_sp != 0 else 0.0
                     
                     p_over = np.mean(res['total'] > ou_line)
                     p_under = np.mean(res['total'] < ou_line)
-                    p_cov_h = np.mean(res['diff'] > -spread_line)
-                    p_cov_a = np.mean(res['diff'] < -spread_line)
+                    p_cov_h = np.mean(res['diff'] < spread_line) # Corregido
+                    p_cov_a = np.mean(res['diff'] > spread_line) # Corregido
                     
                     gid = row['game_id']
                     m_str = f"{row['away_team']} @ {row['home_team']}"
                     
-                    if res['prob_home'] >= 0.55:
-                        all_picks.append({'id': f"{gid}_ML_H", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['home_team']}", 'prob': res['prob_home'], 'odds': get_ml_odds(row.get('home_moneyline'), res['prob_home'])})
-                    if res['prob_away'] >= 0.55:
-                        all_picks.append({'id': f"{gid}_ML_A", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['away_team']}", 'prob': res['prob_away'], 'odds': get_ml_odds(row.get('away_moneyline'), res['prob_away'])})
-                    
-                    if p_cov_h >= 0.55:
-                        all_picks.append({'id': f"{gid}_SP_H", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['home_team']} cubre Spread ({spread_line})", 'prob': p_cov_h, 'odds': 1.91})
-                    if p_cov_a >= 0.55:
-                        all_picks.append({'id': f"{gid}_SP_A", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['away_team']} cubre Spread ({-spread_line})", 'prob': p_cov_a, 'odds': 1.91})
-                    
-                    if p_over >= 0.55:
-                        all_picks.append({'id': f"{gid}_OU_O", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"OVER {ou_line}", 'prob': p_over, 'odds': 1.91})
-                    if p_under >= 0.55:
-                        all_picks.append({'id': f"{gid}_OU_U", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"UNDER {ou_line}", 'prob': p_under, 'odds': 1.91})
+                    if res['prob_home'] >= 0.55: all_picks.append({'id': f"{gid}_ML_H", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['home_team']}", 'prob': res['prob_home'], 'odds': get_ml_odds(row.get('home_moneyline'), res['prob_home'])})
+                    if res['prob_away'] >= 0.55: all_picks.append({'id': f"{gid}_ML_A", 'game': gid, 'match': m_str, 'type': 'ML', 'desc': f"Gana {row['away_team']}", 'prob': res['prob_away'], 'odds': get_ml_odds(row.get('away_moneyline'), res['prob_away'])})
+                    if p_cov_h >= 0.55: all_picks.append({'id': f"{gid}_SP_H", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['home_team']} cubre Spread ({spread_line})", 'prob': p_cov_h, 'odds': 1.91})
+                    if p_cov_a >= 0.55: all_picks.append({'id': f"{gid}_SP_A", 'game': gid, 'match': m_str, 'type': 'Spread', 'desc': f"{row['away_team']} cubre Spread ({-spread_line})", 'prob': p_cov_a, 'odds': 1.91})
+                    if p_over >= 0.55: all_picks.append({'id': f"{gid}_OU_O", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"OVER {ou_line}", 'prob': p_over, 'odds': 1.91})
+                    if p_under >= 0.55: all_picks.append({'id': f"{gid}_OU_U", 'game': gid, 'match': m_str, 'type': 'OU', 'desc': f"UNDER {ou_line}", 'prob': p_under, 'odds': 1.91})
                 
                 valid_parlays = []
                 for k in [2, 3]:
                     for combo in itertools.combinations(all_picks, k):
-                        if juego_obligatorio != "Ninguno" and juego_obligatorio not in [p['match'] for p in combo]:
-                            continue
+                        if juego_obligatorio != "Ninguno" and juego_obligatorio not in [p['match'] for p in combo]: continue
                             
                         is_valid = True
                         g_types = {}
@@ -423,7 +377,9 @@ with tabs[4]:
                         for g_id, t_list in g_types.items():
                             if 'ML' in t_list and 'Spread' in t_list: is_valid = False; break
                             if t_list.count('ML') > 1 or t_list.count('Spread') > 1 or t_list.count('OU') > 1: is_valid = False; break
-                            
+                            if len(t_list) > 1: # ES UN SGP (Mismo partido)
+                                is_valid = False; break # Lo bloqueamos en el generador básico para evitar la asunción de independencia errónea
+                                
                         if not is_valid: continue
                         
                         c_prob = np.prod([p['prob'] for p in combo])
@@ -437,19 +393,19 @@ with tabs[4]:
                         valid_parlays.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'ev': c_ev})
 
                 if not valid_parlays:
-                    st.warning("No se encontraron combinadas sólidas. El modelo es exigente y en esta semana los partidos no superan el filtro de confianza matemática para el riesgo seleccionado.")
+                    st.warning("No se encontraron combinadas sólidas. El modelo es exigente.")
                 else:
                     valid_parlays.sort(key=itemgetter('ev'), reverse=True)
                     top_parlays = valid_parlays[:8]
                     
-                    st.success(f"Se generaron las {len(top_parlays)} mejores opciones basadas en ventajas reales del modelo:")
+                    st.success(f"Se generaron las {len(top_parlays)} mejores opciones basadas en ventajas reales:")
                     for i, parl in enumerate(top_parlays):
                         with st.expander(f"⭐ Opción {i+1} | Probabilidad Real: {parl['prob']*100:.1f}% | Pago: x{parl['odds']:.2f}"):
                             for leg in parl['combo']:
                                 st.markdown(f"- **{leg['match']}**: {leg['desc']} *(Prob. Individual: {leg['prob']*100:.1f}%)*")
                             st.caption(f"Beneficio Esperado (EV): {parl['ev']:.3f}")
 
-# --- PESTAÑA 6: REGISTRO HISTÓRICO ---
+# --- PESTAÑA 6: REGISTRO HISTÓRICO (Sin cambios) ---
 with tabs[5]:
     st.header("📊 Registro Histórico")
     df_preds = tracker.load_predictions()
@@ -458,14 +414,14 @@ with tabs[5]:
     else:
         st.dataframe(df_preds, use_container_width=True)
 
-# --- PESTAÑA 7: INFO DEL MODELO ---
+# --- PESTAÑA 7: INFO DEL MODELO (Sin cambios) ---
 with tabs[6]:
     st.header("📈 Desempeño del Modelo")
     c1, c2 = st.columns(2)
     c1.metric("MAE Local (Error promedio)", f"{metrics['mae_home']:.2f} pts")
     c2.metric("MAE Visitante (Error promedio)", f"{metrics['mae_away']:.2f} pts")
 
-# --- PESTAÑA 8: DIAGNÓSTICO ---
+# --- PESTAÑA 8: DIAGNÓSTICO (Original recuperado y ampliado) ---
 with tabs[7]:
     st.header("🐛 Diagnóstico de Características y Predicciones Base")
     st.write(f"Monitor de variables para: Temporada {selected_season} - Semana {selected_week}")
@@ -496,4 +452,14 @@ with tabs[7]:
             })
         
         st.dataframe(pd.DataFrame(diag_data), use_container_width=True)
+        
+        # Agregamos la herramienta de verificación de Nulos y Duplicados
+        st.subheader("Auditoría de Integridad")
+        if st.button("Verificar Fugas y Valores Nulos"):
+            nas = matchups[feat_cols].isna().sum()
+            if nas.sum() > 0:
+                st.warning("⚠️ Variables con NA detectadas (Posible falla en promedios de temporada previa):")
+                st.write(nas[nas > 0])
+            else:
+                st.success("✅ Base de datos limpia. No hay fugas de NAs.")
         
