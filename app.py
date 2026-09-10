@@ -234,20 +234,17 @@ with tabs[3]:
         col_p1, col_p2 = st.columns(2)
         selected_team = col_p1.selectbox("Selecciona Equipo al que pertenece el jugador:", [g_prop['away_team'], g_prop['home_team']])
         
-        # --- CONDICIONAL ESTRICTA SOLICITADA POR EL USUARIO ---
-        # Aislar SOLO los datos de la temporada seleccionada
+        # CONDICIONAL ESTRICTA: ¿Juega en este equipo esta temporada?
         df_season = weekly_data[weekly_data['season'] == selected_season]
         
         if df_season.empty:
-            st.warning(f"⚠️ La temporada {selected_season} aún no tiene estadísticas de jugadores registradas en la base de datos. No se pueden filtrar los rosters actuales.")
-            valid_roster = []
+            # Fallback lógico: Si es semana 1 y no hay historial de esta temporada aún, usamos el último equipo conocido.
+            latest_team_map = weekly_data.sort_values(['season', 'week']).groupby('player_display_name')['recent_team'].last()
+            valid_roster = latest_team_map[latest_team_map == selected_team].index.tolist()
         else:
-            # Agrupar por jugador y tomar su ÚLTIMO equipo registrado EN ESTA TEMPORADA
-            last_team_this_season = df_season.sort_values('week').groupby('player_display_name')['recent_team'].last()
-            
-            # Jugador juega en este equipo esta temporada -> SÍ -> Lo incluyo. NO -> No lo incluyo.
-            valid_roster = last_team_this_season[last_team_this_season == selected_team].index.tolist()
-        # -----------------------------------------------------
+            # Si ya hay datos en la temporada, filtramos SÓLO a quienes hayan registrado al equipo seleccionado como su equipo actual este año.
+            latest_team_this_season = df_season.sort_values('week').groupby('player_display_name')['recent_team'].last()
+            valid_roster = latest_team_this_season[latest_team_this_season == selected_team].index.tolist()
 
         # Extraer todo el historial de esos jugadores validados para alimentar el modelo
         team_players = weekly_data[weekly_data['player_display_name'].isin(valid_roster)]
@@ -284,7 +281,6 @@ with tabs[3]:
             opp_def = pd.concat([opp_h, opp_a]).drop_duplicates(subset=['season', 'week', 'opponent_team'])
 
             for col_stat, stat_name in metrics_list:
-                # Filtrar solo partidos donde la métrica no es nula
                 df_stat = p_data.copy().sort_values(['season', 'week'])
                 if col_stat not in df_stat.columns:
                     continue
@@ -437,10 +433,23 @@ with tabs[5]:
 
 # --- PESTAÑA 7: INFO DEL MODELO ---
 with tabs[6]:
-    st.header("📈 Desempeño del Modelo")
+    st.header("📈 Desempeño y Selección de Modelos (Out-of-Sample)")
+    
     c1, c2 = st.columns(2)
-    c1.metric("MAE Local (Error promedio base)", f"{metrics['mae_home']:.2f} pts")
-    c2.metric("MAE Visitante (Error promedio base)", f"{metrics['mae_away']:.2f} pts")
+    c1.metric(f"MAE Local ({metrics['best_model_home']})", f"{metrics['mae_home']:.2f} pts")
+    c2.metric(f"MAE Visitante ({metrics['best_model_away']})", f"{metrics['mae_away']:.2f} pts")
+    
+    st.markdown("---")
+    st.subheader("Auditoría de Validación Temporal (Time Series Split)")
+    st.write("Errores Absolutos Medios obtenidos simulando predicciones sin información futura:")
+    
+    df_eval = pd.DataFrame({
+        "Modelo": list(metrics['results_home'].keys()),
+        "MAE Local (OOS)": list(metrics['results_home'].values()),
+        "MAE Visitante (OOS)": list(metrics['results_away'].values())
+    }).set_index("Modelo").sort_values("MAE Local (OOS)")
+    
+    st.dataframe(df_eval.style.highlight_min(axis=0, color='lightgreen'))
 
 # --- PESTAÑA 8: DIAGNÓSTICO ---
 with tabs[7]:
