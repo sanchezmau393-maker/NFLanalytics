@@ -172,7 +172,6 @@ with tabs[1]:
         n_sims = col_L3.selectbox("Simulaciones:", [1000, 10000, 50000], index=1)
 
         if st.button("🚀 Ejecutar Predicción", type="primary"):
-            # Llama a monte_carlo.run_simulation (asegúrate de que sea la versión bivariada actualizada)
             res = monte_carlo.run_simulation(pred_h, pred_a, std_home, std_away, n_sims=n_sims)
             
             c1, c2, c3 = st.columns(3)
@@ -222,7 +221,7 @@ with tabs[2]:
         st.subheader("Evolución de Eficacia por Semana")
         st.line_chart(valid_games.groupby('week')['is_correct'].mean() * 100)
 
-# --- PESTAÑA 4: PLAYER PROPS (Con Buscador Global para Traspasos) ---
+# --- PESTAÑA 4: PLAYER PROPS (Condicional Estricta) ---
 with tabs[3]:
     st.header("🏃 Player Props (Sin Fugas y Corrección de Línea Cero)")
     if not st.session_state.selected_game_id:
@@ -235,39 +234,29 @@ with tabs[3]:
         col_p1, col_p2 = st.columns(2)
         selected_team = col_p1.selectbox("Selecciona Equipo al que pertenece el jugador:", [g_prop['away_team'], g_prop['home_team']])
         
-        # 1. INTENTO DE FILTRADO INTELIGENTE (Smart Roster)
-        weekly_data_sorted = weekly_data.sort_values(['season', 'week'])
+        # CONDICIONAL ESTRICTA SOLICITADA: ¿Juega en este equipo esta temporada?
+        current_season_data = weekly_data[weekly_data['season'] == selected_season].sort_values(['season', 'week'])
         
-        # Jugadores que ya jugaron para este equipo esta misma temporada
-        current_season_data = weekly_data[weekly_data['season'] == selected_season]
-        players_this_season = current_season_data[current_season_data['recent_team'] == selected_team]['player_display_name'].unique().tolist()
-        
-        # Jugadores cuyo último partido en la historia fue con este equipo
-        latest_team_map = weekly_data_sorted.dropna(subset=['recent_team']).groupby('player_display_name')['recent_team'].last()
-        players_last_known = latest_team_map[latest_team_map == selected_team].index.tolist()
-        
-        smart_roster = sorted(list(set(players_this_season + players_last_known)))
-        
-        # 2. OVERRIDE MANUAL (El salvavidas para traspasos recientes como Sam Darnold)
-        mostrar_todos = st.checkbox("🔍 Mostrar todos los jugadores de la liga (Activa esto si el jugador fue traspasado recientemente y no aparece)")
-        
-        if mostrar_todos:
-            # Mostrar todos los jugadores con historial válido
-            valid_players = weekly_data.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
-            player_names = sorted(valid_players['player_display_name'].unique())
+        if current_season_data.empty:
+            # Fallback lógico: Si es semana 1 y no hay historial de esta temporada aún, usamos el último equipo conocido.
+            latest_team_map = weekly_data.sort_values(['season', 'week']).groupby('player_display_name')['recent_team'].last()
+            valid_roster = latest_team_map[latest_team_map == selected_team].index.tolist()
         else:
-            # Mostrar solo los detectados automáticamente
-            valid_data = weekly_data[weekly_data['player_display_name'].isin(smart_roster)]
-            valid_players = valid_data.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
-            player_names = sorted(valid_players['player_display_name'].unique())
+            # Si ya hay datos en la temporada, filtramos SÓLO a quienes hayan registrado al equipo seleccionado como su equipo actual este año.
+            latest_team_this_season = current_season_data.groupby('player_display_name')['recent_team'].last()
+            valid_roster = latest_team_this_season[latest_team_this_season == selected_team].index.tolist()
+        
+        # Filtramos el historial completo de esos jugadores validados
+        team_players = weekly_data[weekly_data['player_display_name'].isin(valid_roster)]
+        valid_players = team_players.groupby('player_display_name').filter(lambda x: len(x.dropna(subset=['passing_yards', 'rushing_yards', 'receiving_yards'], how='all')) >= 3)
+        player_names = sorted(valid_players['player_display_name'].unique())
 
         if not player_names:
-            st.warning("No se encontraron jugadores. Activa la casilla de 'Mostrar todos los jugadores' arriba.")
+            st.warning(f"No hay jugadores registrados en {selected_team} para la temporada {selected_season} con historial suficiente.")
         else:
-            # Streamlit permite escribir en el selectbox para buscar rápido
-            selected_player = col_p2.selectbox("Selecciona Jugador (Puedes escribir su nombre):", player_names)
+            selected_player = col_p2.selectbox("Selecciona Jugador:", player_names)
             
-            p_data = weekly_data[weekly_data['player_display_name'] == selected_player]
+            p_data = valid_players[valid_players['player_display_name'] == selected_player]
             
             # Obtener la posición correcta y más reciente
             pos_data = p_data['position'].dropna()
@@ -292,7 +281,6 @@ with tabs[3]:
             opp_def = pd.concat([opp_h, opp_a]).drop_duplicates(subset=['season', 'week', 'opponent_team'])
 
             for col_stat, stat_name in metrics_list:
-                # Filtrar solo partidos donde la métrica no es nula
                 df_stat = p_data.copy().sort_values(['season', 'week'])
                 if col_stat not in df_stat.columns:
                     continue
